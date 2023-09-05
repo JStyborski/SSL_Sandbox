@@ -74,7 +74,7 @@ def model_setup(stateDict, freezeEnc):
     """
 
     # Create model and load model weights
-    model = SSL_Model.SmallSimSiam(stateDict['encArch'], stateDict['encDim'], stateDict['prjDim'], stateDict['prdDim'])
+    model = SSL_Model.Base_Model(stateDict['encArch'], stateDict['encDim'], stateDict['prjDim'], stateDict['prdDim'])
     model.load_state_dict(stateDict['stateDict'], strict=False)
 
     # Freeze all layers (though predictor will later be replaced and trainable)

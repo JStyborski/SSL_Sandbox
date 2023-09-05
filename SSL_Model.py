@@ -50,7 +50,7 @@ class ResNetBlock(nn.Module):
         return out
 
 
-class SimSiam(nn.Module):
+class Base_Model(nn.Module):
     def __init__(self, encArch=None, encDim=256, prjDim=256, prdDim=128, momEncBeta=0):
         """
         Create SimSiam model with encoder and predictor
@@ -58,7 +58,7 @@ class SimSiam(nn.Module):
         :param encDim: [int] [1] - Encoder output dimensionality
         :param prdDim: [int] [1] - Predictor hidden dimensionality
         """
-        super(SimSiam, self).__init__()
+        super(Base_Model, self).__init__()
         self.momEncBeta = momEncBeta
 
         self.encoder = models.__dict__[encArch](num_classes=encDim, zero_init_residual=True)

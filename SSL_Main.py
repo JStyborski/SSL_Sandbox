@@ -69,7 +69,7 @@ trainDataset = datasets.ImageFolder(trainRoot, SSL_Transforms.TwoTimesTransform(
 trainDataLoader = torch.utils.data.DataLoader(trainDataset, batch_size=batchSize, shuffle=True, drop_last=True)
 
 # Instantiate model and (custom) optimizer
-model = SSL_Model.SimSiam(encArch, encDim, prjDim, prdDim, momEncBeta).to(device)
+model = SSL_Model.Base_Model(encArch, encDim, prjDim, prdDim, momEncBeta).to(device)
 optimParams = [{'params': model.encoder.parameters(), 'decayLR': decayEncLR},
                {'params': model.projector.parameters(), 'decayLR': decayEncLR},
                {'params': model.predictor.parameters(), 'decayLR': decayPrdLR}]
@@ -192,10 +192,10 @@ print([probes.p1EigAUCProbe.storeList[epIdx - 1] for epIdx in epochList])
 print([probes.z1EigAUCProbe.storeList[epIdx - 1] for epIdx in epochList])
 #print([probes.r1EigAUCProbe.storeList[epIdx - 1] for epIdx in epochList])
 print([probes.mz2EigAUCProbe.storeList[epIdx - 1] for epIdx in epochList])
-#print([probes.p1LolipProbe.storeList[epIdx - 1] for epIdx in epochList])
-#print([probes.z1LolipProbe.storeList[epIdx - 1] for epIdx in epochList])
 print([probes.p1z1EigAlignProbe.storeList[epIdx - 1] for epIdx in epochList])
 print([probes.p1mz2EigAlignProbe.storeList[epIdx - 1] for epIdx in epochList])
+#print([probes.p1LolipProbe.storeList[epIdx - 1] for epIdx in epochList])
+#print([probes.z1LolipProbe.storeList[epIdx - 1] for epIdx in epochList])
 print([probes.r1LolipProbe.storeList[epIdx - 1] for epIdx in epochList])
 
 print(np.log(probes.p1EigProbe.storeList[-1]).tolist())
