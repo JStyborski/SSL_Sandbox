@@ -27,8 +27,8 @@ cropSize = 28
 # Model parameters
 encArch = 'resnet18' # 'vit_b_16' # vit requires 224 input size
 encDim = 512
-prjDim = 512
-prdDim = int(encDim / 2) # Set prdDim = None to not use a predictor (sets predictor as Identity)
+prjDim = 2048
+prdDim = int(prjDim / 4) # Set prdDim = None to not use a predictor (sets predictor as Identity)
 #prdDim = None
 
 # Momentum encoder settings
@@ -53,7 +53,7 @@ nEpochs = 100
 batchSize = 512
 epochBatches = 10000000
 momentum = 0.9
-weightDecay = 1e-4
+weightDecay = 1e-5
 initLR = 0.5
 initLR = initLR * batchSize / 256
 decayEncLR = True

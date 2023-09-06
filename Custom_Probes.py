@@ -107,8 +107,8 @@ class Pretrain_Probes:
         p1Corr = Analysis_Utils.cross_corr(p1, p1)
         z1EigvecTrans = np.tensordot(p1Corr, z1Eigvecs, axes=(-1, 0))
         mz2EigvecTrans = np.tensordot(p1Corr, mz2Eigvecs, axes=(-1, 0))
-        self.p1z1EigAlignProbe.store(np.mean(Analysis_Utils.cos_sim_bt_vecs(z1EigvecTrans[:, :100].T, z1Eigvecs[:, :100].T)))
-        self.p1mz2EigAlignProbe.store(np.mean(Analysis_Utils.cos_sim_bt_vecs(mz2EigvecTrans[:, :100].T, mz2Eigvecs[:, :100].T)))
+        self.p1z1EigAlignProbe.store(np.mean(Analysis_Utils.cos_sim_bt_vecs(z1EigvecTrans[:, :512].T, z1Eigvecs[:, :512].T)))
+        self.p1mz2EigAlignProbe.store(np.mean(Analysis_Utils.cos_sim_bt_vecs(mz2EigvecTrans[:, :512].T, mz2Eigvecs[:, :512].T)))
 
         randIdxArr = np.random.choice(range(x1.size(0)), size=8, replace=False).tolist()
         randInpsTens = x1[randIdxArr, :]

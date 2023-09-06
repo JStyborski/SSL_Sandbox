@@ -66,7 +66,7 @@ def cross_cov(xArr1, xArr2):
     """
     xMeanArr1 = np.mean(xArr1, axis=0, keepdims=True)
     xMeanArr2 = np.mean(xArr2, axis=0, keepdims=True)
-    crossCov = 1 / xArr1.shape[0] * np.dot(np.transpose(xArr1 - xMeanArr1), xArr2 - xMeanArr2)
+    crossCov = 1 / xArr1.shape[0] * (np.transpose(xArr1 - xMeanArr1) @ (xArr2 - xMeanArr2))
     return crossCov
 
 

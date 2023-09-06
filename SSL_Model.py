@@ -69,16 +69,16 @@ class Base_Model(nn.Module):
         self.encoder.maxpool = nn.Identity()
 
         self.projector = nn.Sequential(
-            nn.Linear(encDim, encDim, bias=True),
+            nn.Linear(encDim, encDim, bias=False),
             nn.BatchNorm1d(encDim),
             nn.ReLU(inplace=True),
-            nn.Linear(encDim, encDim, bias=True),
-            nn.BatchNorm1d(prjDim)
+            nn.Linear(encDim, prjDim, bias=False),
+            nn.BatchNorm1d(prjDim, affine=False)
         )
 
         if prdDim is not None:
             self.predictor = nn.Sequential(
-                nn.Linear(prjDim, prdDim, bias=True),
+                nn.Linear(prjDim, prdDim, bias=False),
                 nn.BatchNorm1d(prdDim),
                 nn.ReLU(inplace=True),
                 nn.Linear(prdDim, prjDim, bias=True),
