@@ -96,6 +96,11 @@ def pgd(model, loss_fn, X, Y, alpha, eps, norm, batch_size, n_restarts, n_steps,
     :param model: [function] [1] - Callable function that takes an input tensor and returns the model logits
     :param loss_fn: [function] [1] - Callable function for calculating loss values per input - the loss function
         should be initialized already with reduction='none' so that each input gets a loss
+        - CrossEntropyLoss - Typical loss used for FGSM/PGD. The main issue is when logit magnitudes are large (e.g., 500)
+        such that the softmax(logits) exponential is dominated by 1 term and the output distribution is a one-hot.
+        If the one-hot is correct, then CE loss is 0, then the gradient is 0, then eta is 0, the x_adv = x.
+        Typical remedies are to L2 normalize logits or use NLLLoss (below)
+        - NLLLoss - Not typically used for FGSM/PGD. This essentially returns the negative of the correct logit as loss.
     :param X: [Pytorch tensor] [m x n] - Nominal input tensor
     :param Y: [tensor] [m] - Tensor with truth labels
     :param alpha: [float] [1] - Input variation parameter, see https://arxiv.org/abs/1412.6572

@@ -5,7 +5,6 @@ from torch import nn
 from torchmetrics.functional.pairwise import pairwise_cosine_similarity
 import torchvision.models as models
 
-
 # Function to reinitialize all resettable weights of a given model
 def reset_model_weights(layer):
     if hasattr(layer, 'reset_parameters'):
@@ -51,40 +50,55 @@ class ResNetBlock(nn.Module):
 
 
 class Base_Model(nn.Module):
-    def __init__(self, encArch=None, encDim=256, prjDim=256, prdDim=128, momEncBeta=0):
+    def __init__(self, encArch=None, cifarMod=False, encDim=512, prjHidDim=2048, prjOutDim=2048, prdDim=512, prdAlpha=None, prdEps=0.3, prdBeta=0.5, momEncBeta=0):
         """
-        Create SimSiam model with encoder and predictor
-        :param inDim: [int] [1] - Input data dimensionality
-        :param encDim: [int] [1] - Encoder output dimensionality
-        :param prdDim: [int] [1] - Predictor hidden dimensionality
+
+        :param encArch:
+        :param cifarMod:
+        :param encDim:
+        :param prjHidDim:
+        :param prjOutDim:
+        :param prdDim:
+        :param prdAlpha:
+        :param prdEps:
+        :param prdBeta:
+        :param momEncBeta:
         """
         super(Base_Model, self).__init__()
+        self.prdAlpha = prdAlpha
+        self.prdEps = prdEps
+        self.prdBeta = prdBeta
+        self.momZCor = None  # Initialize momentum correlation matrix as None (overwritten later)
         self.momEncBeta = momEncBeta
 
         self.encoder = models.__dict__[encArch](num_classes=encDim, zero_init_residual=True)
         self.encoder.fc = nn.Identity(encDim)
 
-        # CIFAR ResNet mod (used in SoloLearn)
-        self.encoder.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=2, bias=False)
-        self.encoder.maxpool = nn.Identity()
+        # CIFAR ResNet mod
+        if 'resnet' in encArch and cifarMod:
+            self.encoder.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=2, bias=False)
+            self.encoder.maxpool = nn.Identity()
 
         self.projector = nn.Sequential(
-            nn.Linear(encDim, encDim, bias=False),
-            nn.BatchNorm1d(encDim),
+            nn.Linear(encDim, prjHidDim, bias=False),
+            nn.BatchNorm1d(prjHidDim),
             nn.ReLU(inplace=True),
-            nn.Linear(encDim, prjDim, bias=False),
-            nn.BatchNorm1d(prjDim, affine=False)
+            nn.Linear(prjHidDim, prjHidDim, bias=False),
+            nn.BatchNorm1d(prjHidDim),
+            nn.ReLU(inplace=True),
+            nn.Linear(prjHidDim, prjOutDim, bias=False),
+            nn.BatchNorm1d(prjOutDim, affine=False)
         )
 
-        if prdDim is not None:
+        if prdDim > 0 and self.prdAlpha is None:
             self.predictor = nn.Sequential(
-                nn.Linear(prjDim, prdDim, bias=False),
+                nn.Linear(prjOutDim, prdDim, bias=False),
                 nn.BatchNorm1d(prdDim),
                 nn.ReLU(inplace=True),
-                nn.Linear(prdDim, prjDim, bias=True),
+                nn.Linear(prdDim, prjOutDim, bias=True),
             )
         else:
-            self.predictor = nn.Identity(prjDim)
+            self.predictor = nn.Identity(prjOutDim)
 
         if self.momEncBeta > 0.0:
 
@@ -107,12 +121,47 @@ class Base_Model(nn.Module):
         z = self.projector(r)
         p = self.predictor(z)
 
+        # Run optimal predictor
+        if self.prdAlpha is not None:
+            Wp = self.calculate_optimal_predictor(z)
+            p = z @ Wp
+
+        # Run momentum encoder
         if self.momEncBeta > 0.0:
             mz = self.momentum_projector(self.momentum_encoder(x))
         else:
             mz = z
 
         return p, z, r, mz
+
+    def calculate_optimal_predictor(self, z):
+
+        device = torch.device(z.get_device())
+
+        # Use stop-gradient on calculating optimal weights matrix (I think)
+        with torch.no_grad():
+
+            # Calculate projector output correlation matrix
+            zCor = 1 / z.size(0) * torch.tensordot(z, z, dims=([0], [0]))
+
+            # Momentum update (or initialize) correlation matrix
+            if self.momZCor is not None:
+                self.momZCor = self.prdBeta * self.momZCor + (1 - self.prdBeta) * zCor
+            else:
+                self.momZCor = zCor
+
+            # Calculate exponential of correlation matrix and then optimal predictor weight matrix
+            # Note that I've tested multiple values of alpha. alpha=0.5 works well, alpha=1.0 causes complete collapse
+            # The DirectSet paper mentions that for alpha=1.0, fAlpha or Wp needs regularization and normalization
+            # I thought this referred to the prdEps term and matrix norm of fAlpha, but apparently that's not enough
+            corEigvals, corEigvecs = torch.linalg.eigh(self.momZCor)
+            corEigvals = torch.clamp(torch.real(corEigvals), 0)
+            corEigvecs = torch.real(corEigvecs)
+            fAlpha = corEigvecs @ torch.diag(torch.pow(corEigvals, self.prdAlpha)) @ torch.transpose(corEigvecs, 0, 1)
+            # Shortcut: ||fAlpha||_spec = torch.linalg.matrix_norm(fAlpha, ord=2) = corEigval[-1].pow(self.prdAlpha)
+            Wp = fAlpha / corEigvals[-1].pow(self.prdAlpha) + self.prdEps * torch.eye(zCor.size(0), device=device)
+
+        return Wp
 
     def update_momentum_network(self):
         if self.momEncBeta > 0.0:
@@ -123,8 +172,7 @@ class Base_Model(nn.Module):
 
 
 class Weighted_InfoNCE:
-    def __init__(self, nceBeta=0.0, nceBetaScheme=None, usePrd4CL=True, nceTau=0.1, downSamples=None,
-                 mecReg=False, mecED2=0.06, mecTay=2):
+    def __init__(self, nceBeta=0.0, nceBetaScheme=None, usePrd4CL=True, nceTau=0.1, downSamples=None):
         self.nceBeta = nceBeta
         self.nceBetaScheme = nceBetaScheme
         if self.nceBetaScheme is not None:
@@ -133,9 +181,6 @@ class Weighted_InfoNCE:
         self.nceTau = nceTau
         self.downSamples = downSamples
         self.cossim = nn.CosineSimilarity(dim=1)
-        self.mecReg = mecReg
-        if self.mecReg:
-            self.mecLoss = MEC(mecED2, mecTay)
 
     def forward(self, batch1Prd, batch1Prj, batch2Prj):
 
@@ -158,10 +203,6 @@ class Weighted_InfoNCE:
             # Calculate the log-sum-exp of the pairwise similarities, averaged over the batch
             lossVal += self.nceBeta * self.nceTau * \
                        (torch.exp(nds / self.nceTau) + torch.exp(nss / self.nceTau)).sum(dim=-1).log().mean()
-
-        # Apply MEC loss as regularizer (if specified)
-        if self.mecReg:
-            lossVal += self.mecLoss.forward(batch1Prd, batch1Prj, batch2Prj)
 
         return lossVal
 
@@ -232,7 +273,7 @@ class MEC:
         return lossVal
 
 
-class BT_CrossCorr:
+class Barlow_Twins_Loss:
     # Review for correctness - do batches need to be normalized in feature dim? double check multiplication
     # Doublecheck hsic application
     def __init__(self, btLam, lossForm='bt'):
@@ -248,6 +289,7 @@ class BT_CrossCorr:
         normBatch1 = (batch1Prd - batch1Prd.mean(dim=0, keepdim=True)) / batch1Prd.std(dim=0, unbiased=True, keepdim=True)
         normBatch2 = (batch2Prj - batch2Prj.mean(dim=0, keepdim=True)) / batch2Prj.std(dim=0, unbiased=True, keepdim=True)
 
+        # Redo the following but elegantly to use triu - saves time and device allocation
         if self.lossForm == 'bt':
             onesMat = -1.0 * torch.eye(prjDim, device=device)
         elif self.lossForm == 'hsic':
@@ -257,6 +299,33 @@ class BT_CrossCorr:
         # Calculate cross-correlation and Barlow Twins cross-correlation loss
         crossCorr = 1.0 / batch1Prd.size(0) * torch.tensordot(normBatch1, normBatch2, dims=([0], [0]))
         lossVal = ((crossCorr + onesMat).pow(2) * offDiagMult).sum()
+
+        return lossVal
+
+
+class VICReg_Loss:
+
+    def __init__(self, alpha, beta, gamma):
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+
+    def forward(self, batch1Prd, batch1Prj, batch2Prj):
+
+        # Calculate covariance and covariance losses of batches 1 and 2
+        b1Cov = torch.cov(batch1Prd.T)
+        b2Cov = torch.cov(batch2Prj.T)
+        cov1Loss = 2 / batch1Prd.size(1) * torch.triu(b1Cov, 1).square().sum()
+        cov2Loss = 2 / batch2Prj.size(1) * torch.triu(b2Cov, 1).square().sum()
+
+        # Get variances from covariance matrices and calculate variance losses
+        var1Loss = 1 / batch1Prd.size(1) * (1 - torch.diag(batch1Prd).clamp(1e-6).sqrt()).clamp(0).sum()
+        var2Loss = 1 / batch2Prj.size(1) * (1 - torch.diag(batch2Prj).clamp(1e-6).sqrt()).clamp(0).sum()
+
+        # Calculate L2 distance loss between encodings
+        invLoss = 1 / batch1Prd.size(0) * torch.linalg.vector_norm(batch1Prd - batch2Prj, ord=2, dim=1).square().sum()
+
+        lossVal = self.alpha * (var1Loss + var2Loss) + self.beta * invLoss + self.gamma * (cov1Loss + cov2Loss)
 
         return lossVal
 

@@ -1,0 +1,360 @@
+import argparse
+import builtins
+from distutils.util import strtobool
+import math
+import numpy as np
+import random
+import time
+import warnings
+
+import torch
+import torch.backends.cudnn as cudnn
+import torchvision.datasets as datasets
+
+import SSL_Dataset
+import SSL_Transforms
+import SSL_Model
+import Custom_Probes
+
+# CUDNN automatically searches for the best algorithm for processing a given model/optimizer/dataset
+cudnn.benchmark = True
+
+###############
+# User Inputs #
+###############
+
+parser = argparse.ArgumentParser()
+
+# Run processing parameters
+parser.add_argument('--multiprocDistrib', default=True, type=lambda x:bool(strtobool(x)), help='Strategy to launch on single/multiple GPU')
+parser.add_argument('--gpu', default=0, type=int, help='GPU ID to use for training (single GPU)')
+parser.add_argument('--nodeCount', default=1, type=int, help='Number of nodes/servers to use for distributed training')
+parser.add_argument('--nodeRank', default=0, type=int, help='Global rank of nodes/servers')
+parser.add_argument('--distURL', default='tcp://127.0.0.1:2345', type=str, help='URL for distributed training setup')
+parser.add_argument('--distBackend', default='nccl', type=str, help='Distributed backend method')
+parser.add_argument('--workers', default=32, type=int, help='Total number of data-loading workers')
+parser.add_argument('--randSeed', default=None, type=int, help='RNG initial set point')
+
+# Dataset parameters
+parser.add_argument('--trainRoot', default='', type=str, help='Training dataset root directory')
+parser.add_argument('--trainLabels', default=True, type=lambda x:bool(strtobool(x)), help='Boolean if the training data is in label folders')
+parser.add_argument('--cropSize', default=224, type=int, help='Crop size to use for input images')
+
+# Training parameters
+parser.add_argument('--nEpochs', default=100, type=int, help='Number of epochs to run')
+parser.add_argument('--startEpoch', default=1, type=int, help='Epoch at which to start')
+parser.add_argument('--batchSize', default=512, type=int, help='Data loader batch size')
+parser.add_argument('--momentum', default=0.9, type=float, help='SGD momentum value')
+parser.add_argument('--weightDecay', default=1e-4, type=float, help='SGD weight decay value')
+parser.add_argument('--initLR', default=0.05, type=float, help='SGD initial learning rate')
+parser.add_argument('--decayEncLR', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to apply cosine decay to encoder/projector learning rate')
+parser.add_argument('--decayPrdLR', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply cosine decay to predictor learning rate')
+parser.add_argument('--lrWarmupEp', default=10, type=int, help='Number of linear warmup steps to apply on learning rate - set as 0 for no warmup')
+parser.add_argument('--loadChkPt', default=None, type=str, help='File name of checkpoint from which to resume')
+
+# Model parameters
+parser.add_argument('--encArch', default='resnet18', type=str, help='Encoder network (backbone) type')
+parser.add_argument('--cifarMod', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply CIFAR modification to ResNets')
+parser.add_argument('--encDim', default=512, type=int, help='Encoder output dimension')
+parser.add_argument('--prjHidDim', default=2048, type=int, help='Projector hidden dimension')
+parser.add_argument('--prjOutDim', default=2048, type=int, help='Projector output dimension')
+parser.add_argument('--prdDim', default=512, type=int, help='Predictor hidden dimension - set as 0 for no predictor')
+parser.add_argument('--prdAlpha', default=None, type=float, help='Optimal predictor correlation exponent - set as None for no optimal predictor')
+parser.add_argument('--prdEps', default=0.3, type=float, help='Optimal predictor regularization coefficient')
+parser.add_argument('--prdBeta', default=0.5, type=float, help='Optimal predictor correlation update momentum')
+parser.add_argument('--momEncBeta', default=0.0, type=float, help='Momentum encoder update momentum - set as 0.0 for no momentum encoder')
+parser.add_argument('--applySG', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to apply stop-gradient to one branch')
+parser.add_argument('--symmetrizeLoss', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to apply loss function equally on both augmentation batches')
+parser.add_argument('--nceBeta', default=0.0, type=float, help='Contrastive term coefficient in InfoNCE loss - set as 0.0 for no contrastive term')
+parser.add_argument('--nceBetaScheme', default=None, type=str, help='Method for increasing/decreasing nceBeta - set as None to not change nceBeta')
+parser.add_argument('--usePrd4CL', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to use predictor or projector output for contrastive term')
+parser.add_argument('--nceTau', default=0.1, type=float, help='Contrastive loss temperature factor')
+parser.add_argument('--downSamples', default=None, type=int, help='Number of samples to use for contrastive calculation - set as None to use full batch')
+
+##################
+# Misc Functions #
+##################
+
+def save_chkpt(epoch, encArch, cifarMod, encDim, prjHidDim, prjOutDim, prdDim, prdAlpha, prdEps, prdBeta, momEncBeta, model, optimizer):
+    torch.save({'epoch': epoch, 'encArch': encArch, 'cifarMod': cifarMod, 'encDim': encDim, 'prjHidDim': prjHidDim, 'prjOutDim': prjOutDim,
+                'prdDim': prdDim, 'prdAlpha': prdAlpha, 'prdEps': prdEps, 'prdBeta': prdBeta, 'momEncBeta': momEncBeta,
+                'stateDict': model.state_dict(), 'optimStateDict': optimizer.state_dict()},
+               'Trained_Models/pt_{:04d}.pth.tar'.format(epoch))
+
+def gather_tensors(outLen, tens):
+    outTens = torch.zeros(outLen, tens.size(1), device=tens.get_device())
+    torch.distributed.all_gather_into_tensor(outTens, tens)
+    return outTens
+
+###################
+# Setup Functions #
+###################
+
+def main():
+
+    args = parser.parse_args()
+
+    # Overwrite defaults (hack for Pycharm)
+    args.multiprocDistrib = False
+    args.workers = 4
+    args.trainRoot = r'D:\CIFAR-10\train'
+    #args.trainRoot = r'D:\CIFAR-10\Poisoned\OPS'
+    args.cropSize = 28
+    args.nEpochs = 400
+    args.weightDecay = 1e-5
+    args.initLR = 0.5
+    args.cifarMod = True
+    args.batchSize = 512
+    #args.prdAlpha = 0.5
+
+    if args.randSeed is not None:
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        cudnn.deterministic = True
+        warnings.warn('You have chosen to seed training'
+                      'This will turn on the CUDNN deterministic setting, which can slow down your training'
+                      'You may see unexpected behavior when restarting from checkpoints')
+
+    if not args.multiprocDistrib:
+        warnings.warn('You have disabled DDP - the model will train on 1 GPU without data parallelism')
+
+    if args.multiprocDistrib and args.nceBeta > 0.0:
+        warnings.warn('InfoNCE loss is not suited for DDP training on multiple GPU')
+        # DDP splits data across multiple GPU and later averages the gradients across GPU
+        # This behavior gives an incorrect estimate of InfoNCE loss due to its reliance on negative pair similarities
+        # 1GPU: batch of 512 -> 2 augmented batches of 1024 -> each of 1024 samples has 1023 negatives
+        # 4GPU: batch of 512, split 128/GPU -> 4 * 2 augmented batches of 256 -> each of 256 samples has 255 negatives
+        # SimCLR disallows multi-GPU training entirely, only allowing parallelizing on TPUs
+        # CLIP accepts that the batch size is split across GPUs and doesn't call their loss "InfoNCE"
+
+    # Launch multiple (or single) distributed processes for main_worker function - will automatically assign GPUs
+    if args.multiprocDistrib:
+        args.nProcPerNode = torch.cuda.device_count()
+        args.nProcs = args.nProcPerNode * args.nodeCount
+        torch.multiprocessing.spawn(main_worker, nprocs=args.nProcs, args=(args,))
+    # Launch one process for main_worker function
+    else:
+        main_worker(args.gpu, args)
+
+######################
+# Execution Function #
+######################
+
+def main_worker(gpu, args):
+
+    # Replace initial GPU index with assigned one
+    args.gpu = gpu
+    print('- GPU {} online'.format(args.gpu))
+
+    # Suppress printing if not master (gpu 0)
+    if args.multiprocDistrib and args.gpu != 0:
+        def print_pass(*args):
+            pass
+        builtins.print = print_pass
+
+    print('- Using GPU {} as master process'.format(args.gpu))
+
+    # Set up distributed training on backend
+    # For multiprocessing distributed training, rank needs to be the global rank among all the processes
+    if args.multiprocDistrib:
+        args.procRank = args.nodeRank * args.nProcPerNode + args.gpu
+        torch.distributed.init_process_group(backend=args.distBackend, init_method=args.distURL,
+                                             world_size=args.nProcs, rank=args.procRank)
+        torch.distributed.barrier()
+
+    print('- Instantiating new model with {} backbone'.format(args.encArch))
+    model = SSL_Model.Base_Model(args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
+                                 args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta)
+
+    # Infer learning rate before modifying batch size for parallelization
+    args.initLR = args.initLR * args.batchSize / 256
+
+    # DDP training
+    print('- Setting up model on single/multiple devices')
+    if args.multiprocDistrib:
+        # Convert BN to SyncBN
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        # For multiproc distributed, DDP constructor should set the single device scope - otherwises uses all available
+        # When using single GPU per process and per DDP, need to divide batch size and workers based on nGPUs
+        torch.cuda.set_device(args.gpu)
+        model.cuda(args.gpu)
+        args.batchSize = int(args.batchSize / args.nProcs)
+        args.workers = int(args.workers / args.nProcs)
+        # broadcast_buffers (default=True) lets SyncBN sync running mean and variance for BN
+        # There is a bug in the specific case of applying DDP to 1 GPU:
+        # https://github.com/pytorch/pytorch/issues/73332, https://github.com/pytorch/pytorch/issues/66504
+        # Workaround is to set broadcast_buffers = False when using 1 GPU
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], broadcast_buffers=(args.nProcs > 1))
+    # Single GPU training
+    elif args.gpu is not None:
+        torch.cuda.set_device(args.gpu)
+        model = model.cuda(args.gpu)
+    else:
+        raise NotImplementedError('CPU training not supported')
+
+    # Instantiate custom optimizer that skips momentum encoder and applies decay
+    print('- Instantiating new optimizer')
+    if args.multiprocDistrib:
+        optimParams = [{'params': model.module.encoder.parameters(), 'decayLR': args.decayEncLR},
+                       {'params': model.module.projector.parameters(), 'decayLR': args.decayEncLR},
+                       {'params': model.module.predictor.parameters(), 'decayLR': args.decayPrdLR}]
+    else:
+        optimParams = [{'params': model.encoder.parameters(), 'decayLR': args.decayEncLR},
+                       {'params': model.projector.parameters(), 'decayLR': args.decayEncLR},
+                       {'params': model.predictor.parameters(), 'decayLR': args.decayPrdLR}]
+    optimizer = torch.optim.SGD(params=optimParams, lr=args.initLR, momentum=args.momentum, weight_decay=args.weightDecay)
+
+    # Optionally resume model/optimizer from checkpoint
+    if args.loadChkPt is not None:
+        print('- Loading checkpoint file {}'.format(args.loadChkPt))
+        # Map model to be loaded to specified single GPU
+        chkPt = torch.load(args.loadChkPt, map_location='cuda:{}'.format(args.gpu))
+        args.startEpoch = chkPt['epoch'] + 1
+        model.load_state_dict(chkPt['stateDict'], strict=False)
+        optimizer.load_state_dict(chkPt['optimStateDict'])
+
+    # Define dataset
+    print('- Defining dataset and loader')
+    if args.trainLabels:
+        trainDataset = datasets.ImageFolder(args.trainRoot, SSL_Transforms.TwoTimesTransform(SSL_Transforms.MoCoV2Transform('ssl_train', args.cropSize)))
+    else:
+        trainDataset = SSL_Dataset.no_label_dataset(args.trainRoot, SSL_Transforms.TwoTimesTransform(SSL_Transforms.MoCoV2Transform('ssl_train', args.cropSize)))
+    if args.multiprocDistrib:
+        trainSampler = torch.utils.data.distributed.DistributedSampler(trainDataset)
+    else:
+        trainSampler = None
+    # Note that DistributedSampler automatically shuffles dataset given the set_epoch() function during training
+    trainDataLoader = torch.utils.data.DataLoader(trainDataset, batch_size=args.batchSize, shuffle=(trainSampler is None),
+                                                  num_workers=args.workers, pin_memory=True, sampler=trainSampler, drop_last=True)
+
+    # Define loss
+    print('- Instantiating loss criterion')
+    lossFn = SSL_Model.Weighted_InfoNCE(args.nceBeta, args.nceBetaScheme, args.usePrd4CL, args.nceTau, args.downSamples)
+
+    # Initialize probes for training metrics, checkpoint initial model, and start timer
+    probes = Custom_Probes.Pretrain_Probes()
+    save_chkpt(0, args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
+              args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, model, optimizer)
+    timeStart = time.time()
+
+    # Begin training
+    print('- Beginning training')
+    for epoch in range(args.startEpoch, args.nEpochs + 1):
+
+        # Update sampler with current epoch - required to ensure shuffling works across devices
+        if args.multiprocDistrib:
+            trainSampler.set_epoch(epoch)
+
+        # If using LR warmup, the warmup LR is linear, applies to all layers, and takes priority over decay
+        if epoch <= args.lrWarmupEp:
+            curLR = epoch / args.lrWarmupEp * args.initLR
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = curLR
+
+        # If desired, adjust learning rate for the current epoch using cosine annealing
+        if (args.decayEncLR or args.decayPrdLR) and epoch >= args.lrWarmupEp:
+            curLR = args.initLR * 0.5 * (1. + math.cos(math.pi * (epoch - 1) / args.nEpochs))
+            for param_group in optimizer.param_groups:
+                if param_group['decayLR']:
+                    param_group['lr'] = curLR
+
+        # If using a dynamic loss function, update contrastive coefficient
+        if type(lossFn) is SSL_Model.Weighted_InfoNCE:
+            if lossFn.nceBetaScheme is not None:
+                lossFn.update_nceBeta(epoch, args.nEpochs)
+
+        model.train()
+
+        # Reset sum of losses for each epoch
+        sumLoss = 0.0
+
+        for batchI, batch in enumerate(trainDataLoader):
+
+            aug1Tens = batch[0][0].cuda(args.gpu, non_blocking=True)
+            aug2Tens = batch[0][1].cuda(args.gpu, non_blocking=True)
+
+            # Run each augmented batch through encoder, projector, predictor, and momentum encoder/projector
+            p1, z1, r1, mz1 = model(aug1Tens)
+            p2, z2, r2, mz2 = model(aug2Tens)
+
+            # Apply stop-gradient
+            if args.applySG:
+                mz1 = mz1.detach()
+                mz2 = mz2.detach()
+
+            # Calculate loss
+            if args.symmetrizeLoss:
+                lossVal = 0.5 * (lossFn.forward(p1, z1, mz2) + lossFn.forward(p2, z2, mz1))
+            else:
+                lossVal = lossFn.forward(p1, z1, mz2)
+
+            # Backpropagate
+            optimizer.zero_grad()
+            lossVal.backward()
+            optimizer.step()
+
+            # Update momentum encoder
+            if args.momEncBeta > 0.0:
+                model.update_momentum_network()
+
+            # Keep running sum of loss
+            sumLoss += lossVal.detach()
+
+        print('Epoch: {} / {} | Elapsed Time: {:0.2f} | Avg Loss: {:0.4f}'
+              .format(epoch, args.nEpochs, time.time() - timeStart, sumLoss / (batchI + 1)))
+
+        # Set model to eval for evaluating probes
+        model.eval()
+
+        # If data was split out for DDP, then combine output tensors for analysis
+        if args.multiprocDistrib and args.nProcs > 1:
+            outLen = args.batchSize * args.nProcs
+            p1 = gather_tensors(outLen, p1.detach())
+            z1 = gather_tensors(outLen, z1.detach())
+            r1 = gather_tensors(outLen, r1.detach())
+            r2 = gather_tensors(outLen, r2.detach())
+            mz2 = gather_tensors(outLen, mz2.detach())
+
+        # Note that p1, z1, and mz2 are L2 normd, as SimSiam, BYOL, InfoNCE, and MEC use L2 normalized encodings
+        # This is taken care of in loss functions, but I have to do it explicitly here
+        # This probe update is inaccurate for softmax-normalized encs (DINO, SwAV) or batch normalized encs (Barlow Twins)
+        probes.update_probes(epoch, model, lossVal.detach(),
+                             (p1 / torch.linalg.vector_norm(p1, dim=-1, keepdim=True)).detach(),
+                             (z1 / torch.linalg.vector_norm(z1, dim=-1, keepdim=True)).detach(),
+                             r1.detach(), r2.detach(),
+                             (mz2 / torch.linalg.vector_norm(mz2, dim=-1, keepdim=True)).detach(), aug1Tens.detach())
+        optimizer.zero_grad()
+
+        # Checkpoint model
+        if epoch == 1 or epoch == 5 or (epoch <= 200 and epoch % 10 == 0) or epoch % 50 == 0:
+            save_chkpt(epoch, args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
+                      args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, model, optimizer)
+
+    # Postprocessing and outputs
+
+    #probes.plot_probes()
+
+    epochList = list(range(1, args.nEpochs + 1))
+
+    print([probes.lossProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.r1r2AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.r1AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.r1VarProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.r1CorrStrProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.r1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.r1LolipProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.p1EntropyProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.mz2EntropyProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.mz2p1KLDivProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.p1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.z1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.mz2EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.p1z1EigAlignProbe.storeList[epIdx - 1] for epIdx in epochList])
+    print([probes.p1mz2EigAlignProbe.storeList[epIdx - 1] for epIdx in epochList])
+
+    print(np.log(probes.p1EigProbe.storeList[-1]).tolist())
+    print(np.log(probes.mz2EigProbe.storeList[-1]).tolist())
+
+
+if __name__ == '__main__':
+    main()

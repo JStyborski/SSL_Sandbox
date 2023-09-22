@@ -123,11 +123,23 @@ def maximize_local_lip(model, X, alpha=0.003, eps=0.01, top_norm=1, bot_norm=np.
                 model.zero_grad()
 
                 # Get outputs of the model for x_adv
-                xadvOut = model(x_adv) if outIdx is None else model(x_adv)[outIdx]
+                modelOut = model(x_adv)
+
+                # Hack to include all outputs in backprop graph, yet nullify the unused components
+                # DDP which requires all model components be used in fwd/back, otherwise they are marked for "reduction"
+                # https://github.com/pytorch/pytorch/issues/43690
+                null = 0
+                if outIdx is None:
+                    xadvOut = modelOut
+                else:
+                    xadvOut = modelOut[outIdx]
+                    for idx, output in enumerate(modelOut):
+                        if idx == outIdx: continue
+                        null += 0 * torch.sum(output)
 
                 # Calculate the local lipschitz constant using x and x_adv, then backpropagate to get gradients
                 lolip = lll.forward(x, x_adv, xOut, xadvOut)
-                sumlolip = torch.sum(lolip)
+                sumlolip = torch.sum(lolip) + null
                 sumlolip.backward()
 
                 # Calculate the new adversarial example given the new step - gradient ascent towards higher Lipschitz

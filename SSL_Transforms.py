@@ -77,7 +77,7 @@ class RandomScale1D(object):
 
 def MoCoV2Transform(mode, cropSize):
 
-    if mode == 'train':
+    if mode == 'ssl_train':
         t = transforms.Compose([
             transforms.RandomResizedCrop(cropSize, scale=(0.2, 1.)),
             transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
@@ -88,10 +88,17 @@ def MoCoV2Transform(mode, cropSize):
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-    elif mode == 'test':
+    elif mode == 'lincls_train':
         t = transforms.Compose([
             transforms.RandomResizedCrop(cropSize),
             transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+    elif mode == 'test':
+        t = transforms.Compose([
+            transforms.CenterCrop(cropSize),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])

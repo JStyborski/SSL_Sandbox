@@ -258,10 +258,12 @@ def array_near_zero(xArr):
 def array_eigdecomp(xArr, covOrCor='cov', sorted=True, forceReal=True):
     """
     Get the (possibly) sorted (desc order) eigenvalues and eigenvectors of the covariance of an array of vectors
-    :param xArr: [array or tensor] [m x n] - Array of multiple vectors
-    :param sorted: [Boolean] [1] - Boolean value to sort eigenvalues in descending order
-    :return eigval: [array] [n]
-    :return eigvec: [array] [n x n]
+    :param xArr: [array] [b x d] - Array of multiple vectors
+    :param covOrCor: [string] - 'cov' or 'cor' to indicate whether to measure cross-correlation or covariance
+    :param sorted: [Boolean] - Boolean value to sort eigenvalues in descending order
+    :param forceReal: [Boolean] - Boolean value to force real outputs
+    :return eigval: [array] [d]
+    :return eigvec: [array] [d x d]
     """
     if covOrCor == 'cov':
         coArr = cross_cov(xArr, xArr)
