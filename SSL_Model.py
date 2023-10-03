@@ -119,14 +119,15 @@ class Base_Model(nn.Module):
         """
         r = self.encoder(x)
         z = self.projector(r)
-        p = self.predictor(z)
 
-        # Run optimal predictor
-        if self.prdAlpha is not None:
+        # Run predictor or optimal predictor
+        if self.prdAlpha is None:
+            p = self.predictor(z)
+        else:
             Wp = self.calculate_optimal_predictor(z)
             p = z @ Wp
 
-        # Run momentum encoder
+        # Run momentum encoder or treat momEnc as regular encoder
         if self.momEncBeta > 0.0:
             mz = self.momentum_projector(self.momentum_encoder(x))
         else:
@@ -172,11 +173,8 @@ class Base_Model(nn.Module):
 
 
 class Weighted_InfoNCE:
-    def __init__(self, nceBeta=0.0, nceBetaScheme=None, usePrd4CL=True, nceTau=0.1, downSamples=None):
+    def __init__(self, nceBeta=0.0, usePrd4CL=True, nceTau=0.1, downSamples=None):
         self.nceBeta = nceBeta
-        self.nceBetaScheme = nceBetaScheme
-        if self.nceBetaScheme is not None:
-            self.nceBetaOrig = self.nceBeta
         self.usePrd4CL = usePrd4CL
         self.nceTau = nceTau
         self.downSamples = downSamples
@@ -205,23 +203,6 @@ class Weighted_InfoNCE:
                        (torch.exp(nds / self.nceTau) + torch.exp(nss / self.nceTau)).sum(dim=-1).log().mean()
 
         return lossVal
-
-    def update_nceBeta(self, epoch, nEpochs):
-        # Currently assumes that the final nceBeta value is either 0 (for dn) or 1 (for up)
-        # Note cosine decay slightly modified from LR decay formula to hit exactly 0 for last epoch
-        if self.nceBetaScheme is not None:
-            if self.nceBetaScheme == 'stepdn':
-                self.nceBeta = 0.0 if epoch > nEpochs / 2 else self.nceBetaOrig
-            elif self.nceBetaScheme == 'stepup':
-                self.nceBeta = 1.0 if epoch > nEpochs / 2 else self.nceBetaOrig
-            elif self.nceBetaScheme == 'lindn':
-                self.nceBeta = self.nceBetaOrig * (nEpochs - epoch) / (nEpochs - 1)
-            elif self.nceBetaScheme == 'linup':
-                self.nceBeta = self.nceBetaOrig + (1 - self.nceBetaOrig) * (epoch - 1) / (nEpochs - 1)
-            elif self.nceBetaScheme == 'cosdn':
-                self.nceBeta = self.nceBetaOrig * 0.5 * (1. + math.cos(math.pi * (epoch - 1) / (nEpochs - 1)))
-            elif self.nceBetaScheme == 'cosup':
-                self.nceBeta = self.nceBetaOrig + (1 - self.nceBetaOrig) * 0.5 * (1. - math.cos(math.pi * (epoch - 1) / (nEpochs - 1)))
 
 
 class MEC:

@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 import Model_Analysis.Analysis_Utils as Analysis_Utils
-import Adversarial.Local_Lip as Local_Lip
 
 
 class Probe:
@@ -35,6 +34,7 @@ class Pretrain_Probes:
         self.r1AugSimProbe = Probe()
         self.r1VarProbe = Probe()
         self.r1CorrStrProbe = Probe()
+        self.r1EigProbe = Probe()
         self.r1EigERankProbe = Probe()
         self.r1LolipProbe = Probe()
         self.p1EntropyProbe = Probe()
@@ -50,7 +50,7 @@ class Pretrain_Probes:
         self.p1mz2EigAlignProbe = Probe()
 
     # Assumes model is in eval mode, all inputs/outputs are detached, and all model/inputs/outputs are on same device
-    def update_probes(self, epoch, model, loss, p1, z1, r1, r2, mz2, x1):
+    def update_probes(self, epoch, loss, p1, z1, r1, r2, mz2):
         loss = loss.cpu().numpy()
         p1 = p1.cpu().numpy()
         z1 = z1.cpu().numpy()
@@ -73,17 +73,18 @@ class Pretrain_Probes:
         self.r1CorrStrProbe.store(np.mean(np.abs(r1Corr[np.triu_indices(m=r1Corr.shape[0], k=1, n=r1Corr.shape[1])])))
         # Representation encoding correlation ERank
         r1Eigvals, _ = Analysis_Utils.array_eigdecomp(r1, covOrCor='cor')
+        # self.r1EigProbe.store(r1Eigvals)
+        self.r1EigProbe.storeList = [r1Eigvals]  # Overwrite rather than append (for memory)
         self.r1EigERankProbe.store(np.exp(Analysis_Utils.entropy(r1Eigvals / np.sum(r1Eigvals))))
-        # Get smoothness stats
-        randIdxArr = np.random.choice(range(x1.size(0)), size=8, replace=False).tolist()
-        randInpsTens = x1[randIdxArr, :]
-        avgR1Lolip, _ = Local_Lip.maximize_local_lip(model, randInpsTens, 0.003, 0.01, 1, np.inf, 8, 1, 10, outIdx=2)
-        self.r1LolipProbe.store(avgR1Lolip)
 
         # Get entropy and KL div between encodings
-        self.p1EntropyProbe.store(np.mean(Analysis_Utils.cross_ent_bt_vecs(p1, p1)))
-        self.mz2EntropyProbe.store(np.mean(Analysis_Utils.cross_ent_bt_vecs(mz2, mz2)))
-        self.mz2p1KLDivProbe.store(np.mean(Analysis_Utils.cross_ent_bt_vecs(mz2, p1 / mz2)))
+        #self.p1EntropyProbe.store(np.mean(Analysis_Utils.cross_ent_bt_vecs(p1, p1)))
+        #self.mz2EntropyProbe.store(np.mean(Analysis_Utils.cross_ent_bt_vecs(mz2, mz2)))
+        #self.mz2p1KLDivProbe.store(np.mean(Analysis_Utils.cross_ent_bt_vecs(mz2, p1 / mz2)))
+        # NOTE: I'm overwriting these with None for now, normalized inputs always give the same values, so no point
+        self.p1EntropyProbe.store(None)
+        self.mz2EntropyProbe.store(None)
+        self.mz2p1KLDivProbe.store(None)
 
         # Probe encoding correlation stats
         p1Eigvals, _ = Analysis_Utils.array_eigdecomp(p1, covOrCor='cor')
@@ -139,12 +140,6 @@ class Pretrain_Probes:
         plt.plot(xVals, self.r1EigERankProbe.storeList)
         plt.xlabel('Epoch')
         plt.ylabel('Representation Eigval Effective Rank')
-        plt.grid(visible=True, which='major', axis='x')
-        plt.show()
-
-        plt.plot(xVals, self.r1LolipProbe.storeList)
-        plt.xlabel('Epoch')
-        plt.ylabel('Representation Avg Local Lipschitz')
         plt.grid(visible=True, which='major', axis='x')
         plt.show()
 
@@ -217,24 +212,27 @@ class Finetune_Probes:
         self.ptEpProbe = Probe()
         self.repEigProbe = Probe()
         self.repEigERankProbe = Probe()
+        self.repLolipProbe = Probe()
+        self.knnAccProbe = Probe()
         self.clnTrainAccProbe = Probe()
         self.clnTestAccProbe = Probe()
-        self.knnAccProbe = Probe()
         self.advAccProbe = Probe()
         #self.atkVecEntProbe = Probe()
 
-    def update_probes(self, ptEp, clnTrainAcc, clnTestAcc, knnAcc, advAcc, repBank):
+    def update_probes(self, ptEp, repBank, avgRepLolip, knnAcc, clnTrainAcc, clnTestAcc, advAcc):
         repBank = repBank.cpu().numpy()
 
         self.ptEpProbe.store(ptEp)
-        self.clnTrainAccProbe.store(clnTrainAcc)
-        self.clnTestAccProbe.store(clnTestAcc)
-        self.knnAccProbe.store(knnAcc)
-        self.advAccProbe.store(advAcc)
 
         repEigvals, _ = Analysis_Utils.array_eigdecomp(repBank, covOrCor='cor')
         self.repEigProbe.storeList = [repEigvals]
         self.repEigERankProbe.store(np.exp(Analysis_Utils.entropy(repEigvals / np.sum(repEigvals))))
+        self.repLolipProbe.store(avgRepLolip)
+
+        self.knnAccProbe.store(knnAcc)
+        self.clnTrainAccProbe.store(clnTrainAcc)
+        self.clnTestAccProbe.store(clnTestAcc)
+        self.advAccProbe.store(advAcc)
 
         # Measure cossim of every atk vector to a random vector, count vectors with the same cossim, calculate entropy
         # Note perturbTens is np.float32, so it's necessary to convert the rand vector to np.float32
