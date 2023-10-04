@@ -1,2 +1,0 @@
-I exist to ensure that Trained_Models exists in Github.
-You can delete me.

@@ -53,6 +53,7 @@ parser.add_argument('--decayEncLR', default=True, type=lambda x:bool(strtobool(x
 parser.add_argument('--decayPrdLR', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply cosine decay to predictor learning rate')
 parser.add_argument('--lrWarmupEp', default=10, type=int, help='Number of linear warmup steps to apply on learning rate - set as 0 for no warmup')
 parser.add_argument('--loadChkPt', default=None, type=str, help='File name of checkpoint from which to resume')
+parser.add_argument('--runProbes', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to run metric probes')
 
 # Model parameters
 parser.add_argument('--encArch', default='resnet18', type=str, help='Encoder network (backbone) type')
@@ -96,13 +97,17 @@ def main():
     args = parser.parse_args()
 
     # Overwrite defaults (hack for Pycharm)
-    #args.trainRoot = r'D:\CIFAR-10\Poisoned\AllPois2'
-    #args.ptPrefix = 'AP2'
-    #args.cropSize = 28
-    #args.nEpochs = 400
-    #args.weightDecay = 1e-5
-    #args.initLR = 0.5
-    #args.cifarMod = True
+    args.trainRoot = r'D:\CIFAR-10\Poisoned\TAP_untargeted'
+    args.ptPrefix = 'SimCLR-TAP'
+    args.cropSize = 28
+    args.nEpochs = 1000
+    args.weightDecay = 1e-4
+    args.initLR = 0.25
+    args.cifarMod = True
+    args.nceBeta = 1.0
+    args.nceTau = 0.5
+    args.prdDim = 0
+    args.applySG = False
 
     if args.randSeed is not None:
         random.seed(args.randSeed)
@@ -229,7 +234,8 @@ def main_worker(gpu, args):
         optimizer.load_state_dict(chkPt['optimStateDict'])
 
     # Initialize probes for training metrics, checkpoint initial model, and start timer
-    probes = SSL_Probes.Pretrain_Probes()
+    if args.runProbes:
+        probes = SSL_Probes.Pretrain_Probes()
     save_chkpt(args.ptPrefix, 0, args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
               args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, model, optimizer)
     timeStart = time.time()
@@ -286,7 +292,10 @@ def main_worker(gpu, args):
 
             # Update momentum encoder
             if args.momEncBeta > 0.0:
-                model.update_momentum_network()
+                if args.multiprocDistrib:
+                    model.module.update_momentum_network()
+                else:
+                    model.update_momentum_network()
 
             # Keep running sum of loss
             sumLoss += lossVal.detach()
@@ -294,26 +303,29 @@ def main_worker(gpu, args):
         print('Epoch: {} / {} | Elapsed Time: {:0.2f} | Avg Loss: {:0.4f}'
               .format(epoch, args.nEpochs, time.time() - timeStart, sumLoss / (batchI + 1)))
 
-        # Set model to eval for evaluating probes - ensures that BN and momentum BN running stats don't update
-        model.eval()
+        # Track record metrics while running
+        if args.runProbes:
 
-        # If data was split out for DDP, then combine output tensors for analysis
-        if args.multiprocDistrib and args.nProcs > 1:
-            outLen = args.batchSize * args.nProcs
-            p1 = gather_tensors(outLen, p1.detach())
-            z1 = gather_tensors(outLen, z1.detach())
-            r1 = gather_tensors(outLen, r1.detach())
-            r2 = gather_tensors(outLen, r2.detach())
-            mz2 = gather_tensors(outLen, mz2.detach())
+            # Ensures that BN and momentum BN running stats don't update
+            model.eval()
 
-        # Note that p1, z1, and mz2 are L2 normd, as SimSiam, BYOL, InfoNCE, and MEC use L2 normalized encodings
-        # This is taken care of in loss functions, but I have to do it explicitly here
-        # This probe update is inaccurate for softmax-normalized encs (DINO, SwAV) or batch normalized encs (Barlow Twins)
-        probes.update_probes(epoch, lossVal.detach(),
-                             (p1 / torch.linalg.vector_norm(p1, dim=-1, keepdim=True)).detach(),
-                             (z1 / torch.linalg.vector_norm(z1, dim=-1, keepdim=True)).detach(),
-                             r1.detach(), r2.detach(),
-                             (mz2 / torch.linalg.vector_norm(mz2, dim=-1, keepdim=True)).detach())
+            # If data was split out for DDP, then combine output tensors for analysis
+            if args.multiprocDistrib and args.nProcs > 1:
+                outLen = args.batchSize * args.nProcs
+                p1 = gather_tensors(outLen, p1.detach())
+                z1 = gather_tensors(outLen, z1.detach())
+                r1 = gather_tensors(outLen, r1.detach())
+                r2 = gather_tensors(outLen, r2.detach())
+                mz2 = gather_tensors(outLen, mz2.detach())
+
+            # Note that p1, z1, and mz2 are L2 normd, as SimSiam, BYOL, InfoNCE, and MEC use L2 normalized encodings
+            # This is taken care of in loss functions, but I have to do it explicitly here
+            # This probe update is inaccurate for softmax-normalized encs (DINO, SwAV) or batch normalized encs (Barlow Twins)
+            probes.update_probes(epoch, lossVal.detach(),
+                                 (p1 / torch.linalg.vector_norm(p1, dim=-1, keepdim=True)).detach(),
+                                 (z1 / torch.linalg.vector_norm(z1, dim=-1, keepdim=True)).detach(),
+                                 r1.detach(), r2.detach(),
+                                 (mz2 / torch.linalg.vector_norm(mz2, dim=-1, keepdim=True)).detach())
 
         # Checkpoint model
         if epoch == 1 or epoch == 5 or (epoch <= 100 and epoch % 10 == 0) or (epoch <= 200 and epoch % 20 == 0) or (epoch > 200 and epoch % 50 == 0):
@@ -322,28 +334,30 @@ def main_worker(gpu, args):
 
     # Postprocessing and outputs
 
-    #probes.plot_probes()
+    if args.runProbes:
 
-    epochList = list(range(1, args.nEpochs + 1))
+        #probes.plot_probes()
 
-    print([probes.lossProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.r1r2AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.r1AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.r1VarProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.r1CorrStrProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.r1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.p1EntropyProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.mz2EntropyProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.mz2p1KLDivProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.p1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.z1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.mz2EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.p1z1EigAlignProbe.storeList[epIdx - 1] for epIdx in epochList])
-    print([probes.p1mz2EigAlignProbe.storeList[epIdx - 1] for epIdx in epochList])
+        epochList = list(range(1, args.nEpochs + 1))
 
-    print(np.log(probes.p1EigProbe.storeList[-1]).tolist())
-    print(np.log(probes.mz2EigProbe.storeList[-1]).tolist())
-    print(np.log(probes.r1EigProbe.storeList[-1]).tolist())
+        print([probes.lossProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.r1r2AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.r1AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.r1VarProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.r1CorrStrProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.r1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.p1EntropyProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.mz2EntropyProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.mz2p1KLDivProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.p1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.z1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.mz2EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.p1z1EigAlignProbe.storeList[epIdx - 1] for epIdx in epochList])
+        print([probes.p1mz2EigAlignProbe.storeList[epIdx - 1] for epIdx in epochList])
+
+        print(np.log(probes.p1EigProbe.storeList[-1]).tolist())
+        print(np.log(probes.mz2EigProbe.storeList[-1]).tolist())
+        print(np.log(probes.r1EigProbe.storeList[-1]).tolist())
 
 
 if __name__ == '__main__':

@@ -1,9 +1,9 @@
 import copy
-import math
 import torch
 from torch import nn
 from torchmetrics.functional.pairwise import pairwise_cosine_similarity
 import torchvision.models as models
+
 
 # Function to reinitialize all resettable weights of a given model
 def reset_model_weights(layer):
@@ -14,56 +14,8 @@ def reset_model_weights(layer):
             reset_model_weights(child)
 
 
-class ResNetBlock(nn.Module):
-    def __init__(self, inCh, outCh, stride, expansion):
-        super(ResNetBlock, self).__init__()
-
-        if stride == 1:
-            self.downsample = None
-        else:
-            self.downsample = nn.Sequential(
-                nn.Conv2d(inCh, outCh * expansion, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(outCh * expansion)
-            )
-        self.conv1 = nn.Conv2d(inCh, outCh, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(outCh)
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(outCh, outCh * expansion, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(outCh)
-
-    def forward(self, x):
-
-        if self.downsample is None:
-            xSelf = x
-        else:
-            xSelf = self.downsample(x)
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out += xSelf
-        out = self.relu(out)
-
-        return out
-
-
 class Base_Model(nn.Module):
     def __init__(self, encArch=None, cifarMod=False, encDim=512, prjHidDim=2048, prjOutDim=2048, prdDim=512, prdAlpha=None, prdEps=0.3, prdBeta=0.5, momEncBeta=0):
-        """
-
-        :param encArch:
-        :param cifarMod:
-        :param encDim:
-        :param prjHidDim:
-        :param prjOutDim:
-        :param prdDim:
-        :param prdAlpha:
-        :param prdEps:
-        :param prdBeta:
-        :param momEncBeta:
-        """
         super(Base_Model, self).__init__()
         self.prdAlpha = prdAlpha
         self.prdEps = prdEps
@@ -113,10 +65,13 @@ class Base_Model(nn.Module):
     def forward(self, x):
         """
         Propagate input through encoder and decoder
-        :param x: [tensor] [m x n] - Input tensor
-        :return p: [tensor] [m x outDim] - Predictor output
-        :return z: [tensor] [m x outDim] - Encoder output
+        :param x: [tensor] [m x d] - Input tensor
+        :return p: [tensor] [m x prjOutDim] - Predictor output
+        :return z: [tensor] [m x prjOutDim] - Projector output
+        :return r: [tensor] [m x encDim] - Encoder output
+        :return mz: [tensor] [m x prjOutDim] - Momentum encoder/projector output
         """
+
         r = self.encoder(x)
         z = self.projector(r)
 
@@ -136,8 +91,11 @@ class Base_Model(nn.Module):
         return p, z, r, mz
 
     def calculate_optimal_predictor(self, z):
-
-        device = torch.device(z.get_device())
+        """
+        Calculate the spectral filter of z covariance to apply in place of a predictor
+        :param z: [tensor] [m x d] - Input tensor, output of projector
+        :return Wp: [tensor] [d x d] - Spectrally filtered, normalized, and regularized correlation matrix
+        """
 
         # Use stop-gradient on calculating optimal weights matrix (I think)
         with torch.no_grad():
@@ -160,7 +118,7 @@ class Base_Model(nn.Module):
             corEigvecs = torch.real(corEigvecs)
             fAlpha = corEigvecs @ torch.diag(torch.pow(corEigvals, self.prdAlpha)) @ torch.transpose(corEigvecs, 0, 1)
             # Shortcut: ||fAlpha||_spec = torch.linalg.matrix_norm(fAlpha, ord=2) = corEigval[-1].pow(self.prdAlpha)
-            Wp = fAlpha / corEigvals[-1].pow(self.prdAlpha) + self.prdEps * torch.eye(zCor.size(0), device=device)
+            Wp = fAlpha / corEigvals[-1].pow(self.prdAlpha) + self.prdEps * torch.eye(z.size(1), device=torch.device(z.get_device()))
 
         return Wp
 

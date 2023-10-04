@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
 
 import Model_Analysis.Analysis_Utils as Analysis_Utils
 

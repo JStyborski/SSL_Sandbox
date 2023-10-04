@@ -269,7 +269,7 @@ def array_eigdecomp(xArr, covOrCor='cov', sorted=True, forceReal=True):
         coArr = cross_cov(xArr, xArr)
     elif covOrCor == 'cor':
         coArr = cross_corr(xArr, xArr)
-    eigval, eigvec = np.linalg.eig(coArr)
+    eigval, eigvec = np.linalg.eigh(coArr)
     if forceReal:
         eigval = np.real(eigval)
     if sorted:
