@@ -50,6 +50,7 @@ parser.add_argument('--initLR', default=0.1, type=float, help='SGD initial learn
 parser.add_argument('--useLARS', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply LARS optimizer')
 parser.add_argument('--decayLR', default='cosdn', type=str, help='Learning rate decay method')
 parser.add_argument('--decaySteps', default=[60, 80], type=list, help='Steps at which to apply stepdn decay')
+parser.add_argument('--decayFactor', default=0.1, type=float, help='Factor by which to multiply LR at step down')
 
 #batchSize = 256 # 256 for CIFAR, 4096 for IN1k
 #initLR = 30 # 30 for CIFAR LP, 0.1 for CIFAR FT and IN1k LP
@@ -166,7 +167,7 @@ def main_worker(gpu, args):
                                      stateDict['prjHidDim'], stateDict['prjOutDim'], stateDict['prdDim'], None, 0.3, 0.5, 0.0)
 
         print('- Loading model weights from {}'.format(stateFile))
-        model.load_state_dict(stateDict['stateDict'], strict=True)
+        model.load_state_dict(stateDict['stateDict'], strict=False)
 
         # Freeze all layers (though predictor will later be replaced and trainable)
         if args.ftType == 'lp':
@@ -222,7 +223,7 @@ def main_worker(gpu, args):
             # If desired, adjust learning rate for the current epoch
             if args.decayLR == 'stepdn':
                 if epoch in args.decaySteps:
-                    curLR = args.initLR / 10 ** (args.decaySteps.index(epoch) + 1)
+                    curLR = args.initLR * args.decayFactor ** (args.decaySteps.index(epoch) + 1)
                     for param_group in optimizer.param_groups:
                         param_group['lr'] = curLR
             elif args.decayLR == 'cosdn':

@@ -220,7 +220,7 @@ for stateFile in ptList:
     # Create model and load model weights
     model = SSL_Model.Base_Model(ptStateDict['encArch'], ptStateDict['cifarMod'], ptStateDict['encDim'],
                                  ptStateDict['prjHidDim'], ptStateDict['prjOutDim'], ptStateDict['prdDim'], None, 0.3, 0.5, 0.0)
-    model.load_state_dict(ptStateDict['stateDict'], strict=True)
+    model.load_state_dict(ptStateDict['stateDict'], strict=False)
 
     # Replace the projector with identity and the predictor with linear classifier
     model.projector = nn.Identity(ptStateDict['encDim'])
@@ -239,6 +239,16 @@ for stateFile in ptList:
     # Evaluate representation smoothness
     model.zero_grad()
     avgRepLolip = calculate_smoothness(atkLoader, model)
+
+    # Evaluate KNN accuracy of the model
+    # Can reuse the representation bank already assembled
+    if knnBankBatches == repBankBatches and ftType == 'lp':
+        knnBank = repBank
+        knnLabelBank = labelBank
+    else:
+        knnBank, knnLabelBank = make_rep_bank(knnTrainLoader, batchSize, model, ptStateDict['encDim'], knnBankBatches)
+    knnAcc = knn_vote(knnTestLoader, knnBank, knnLabelBank, k, knnTestBatches)
+    print('KNN Accuracy: {:0.4f}'.format(knnAcc))
 
     # Declare finetune file name and check if it already exists
     ptPrefix = (stateFile[:-8] + '_').split('/')[1]
@@ -261,16 +271,6 @@ for stateFile in ptList:
         model.load_state_dict(ftStateDict, strict=True)
         for param in model.parameters(): param.requires_grad = False
 
-        # Evaluate KNN accuracy of the model
-        # Can reuse the representation bank already assembled
-        if knnBankBatches == repBankBatches and ftType == 'lp':
-            knnBank = repBank
-            knnLabelBank = labelBank
-        else:
-            knnBank, knnLabelBank = make_rep_bank(knnTrainLoader, batchSize, model, ptStateDict['encDim'], knnBankBatches)
-        knnAcc = knn_vote(knnTestLoader, knnBank, knnLabelBank, k, knnTestBatches)
-        print('KNN Accuracy: {:0.4f}'.format(knnAcc))
-
         # Clean dataset accuracy
         clnTrainAcc = train_test_acc(linTrainLoader, model, trainAccBatches)
         print('Train Accuracy: {:0.4f}'.format(clnTrainAcc))
@@ -283,7 +283,6 @@ for stateFile in ptList:
         print('Adv Accuracy: {:0.4f}'.format(advAcc))
 
     else:
-        knnAcc = None
         clnTrainAcc = None
         clnTestAcc = None
         advAcc = None
