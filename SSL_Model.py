@@ -1,6 +1,7 @@
 import copy
 import torch
 from torch import nn
+from torchmetrics.functional.regression import cosine_similarity
 from torchmetrics.functional.pairwise import pairwise_cosine_similarity
 import torchvision.models as models
 
@@ -130,126 +131,95 @@ class Base_Model(nn.Module):
                 mom_prj_params.data = self.momEncBeta * mom_prj_params.data + (1 - self.momEncBeta) * prj_params.data
 
 
-class Weighted_InfoNCE:
-    def __init__(self, nceBeta=0.0, usePrd4CL=True, nceTau=0.1, downSamples=None):
-        self.nceBeta = nceBeta
-        self.usePrd4CL = usePrd4CL
-        self.nceTau = nceTau
-        self.downSamples = downSamples
-        self.cossim = nn.CosineSimilarity(dim=1)
+class Weighted_InfoNCE_Loss:
+    # Implements weighted InfoNCE loss as in https://arxiv.org/abs/2006.07733 and based on https://arxiv.org/abs/2002.05709
+
+    def __init__(self, winceBeta=0.0, winceTau=0.1, winceUsePrd=True, winceDownSamp=None):
+        """
+        :param winceBeta: [float] - Coefficient weight for contrastive loss term (0 gives SimSiam loss, 1 gives InfoNCE)
+        :param winceTau: [float] - Temperature term used in InfoNCE loss
+        :param winceUsePrd: [bool] - Boolean to use predictor output or projector output for contrastive comparison
+        :param winceDownSamp: [int] - Number of samples to use in contrastive comparison
+        """
+        self.winceBeta = winceBeta
+        self.winceTau = winceTau
+        self.winceUsePrd = winceUsePrd
+        self.winceDownSamp = winceDownSamp
 
     def forward(self, batch1Prd, batch1Prj, batch2Prj):
 
         # Positive similarity loss (InfoNCE numerator)
-        lossVal = -1.0 * self.cossim(batch1Prd, batch2Prj).mean()
+        lossVal = -1.0 * cosine_similarity(batch1Prd, batch2Prj, reduction='mean')
 
         # Negative similarity loss (InfoNCE denominator) - This formulation is best seen in the BYOL paper
-        if self.nceBeta > 0.0:
+        if self.winceBeta > 0.0:
 
-            batch1 = batch1Prd if self.usePrd4CL else batch1Prj
+            batch1 = batch1Prd if self.winceUsePrd else batch1Prj
 
             # Use a subset of the contrastive samples for loss calc (if specified)
-            lossSamples = self.downSamples if self.downSamples is not None else batch1.size(0)
+            lossSamples = self.winceDownSamp if self.winceDownSamp is not None else batch1.size(0)
 
             # Calculate the pairwise cossim matrices for b1 x b2 and b1 x b1 (using matrix mult on normalized matrices)
             nds = pairwise_cosine_similarity(batch1[:lossSamples, :], batch2Prj[:lossSamples, :])
             nss = pairwise_cosine_similarity(batch1[:lossSamples, :], batch1[:lossSamples, :])
             nss.fill_diagonal_(0.0)  # Self-similarity within batch skips itself (similarity = 1 otherwise)
+            #nds.fill_diagonal_(0.0) # Not canon, but it's sensible and slightly improves performance
 
-            # Calculate the log-sum-exp of the pairwise similarities, averaged over the batch
-            lossVal += self.nceBeta * self.nceTau * \
-                       (torch.exp(nds / self.nceTau) + torch.exp(nss / self.nceTau)).sum(dim=-1).log().mean()
-
-        return lossVal
-
-
-class MEC:
-    """
-    Implements Maximum Entropy Coding loss from https://arxiv.org/abs/2210.11464
-    """
-
-    def __init__(self, ed2=0.06, taylorTerms=2):
-        """
-        :param ed2 [float]: lam = d / (m * eps^2) = 1 / (m * ed2), so ed2 = eps^2 / d. Authors use ed2 = [0.01, 0.12]
-        :param taylorTerms [int]: Number of terms to use in Taylor expansion of the matrix logarithm
-        """
-        self.ed2 = ed2
-        self.taylorTerms = taylorTerms
-
-    def forward(self, batch1Prd, batch1Prj, batch2Prj):
-        """
-        :param batch1Prd: [tensor] [m x d] - Batch of online predictor outputs
-        :param batch1Prj: [tensor] [m x d] - Batch of online projector outputs
-        :param batch2Prj: [tensor] [m x d] - Batch of target projector outputs
-        :return lossVal: [float] - MEC loss
-        """
-
-        # Get device
-        device = torch.device(batch1Prd.get_device()) if batch1Prd.get_device() > -1 else torch.device('cpu')
-
-        # Ensure batches are L2 normalized along feature dimension
-        batch1 = batch1Prd / torch.norm(batch1Prd, p=2, dim=1, keepdim=True)
-        batch2 = batch2Prj / torch.norm(batch2Prj, p=2, dim=1, keepdim=True)
-
-        # Calculate mu and lam coefficients
-        mu = (batch1.size(0) + batch1.size(1)) / 2
-        lam = 1 / (batch1.size(0) * self.ed2)
-
-        # Calculate correlation matrix and initialize the correlation exponential and Taylor sum
-        corr = lam * torch.tensordot(batch1, batch2, dims=([-1], [-1])) # [m x m] batch-wise correlation matrix
-        #corr = lam * torch.tensordot(batch1, batch2, dims=([0], [0])) # [d x d] feature-wise correlation matrix
-        powerCorr = torch.eye(corr.size(0), device=device)
-        sumCorr = torch.zeros_like(corr)
-
-        # Loop through Taylor terms and cumulatively add powers of the correlation matrix
-        for k in range(self.taylorTerms):
-            powerCorr = torch.tensordot(powerCorr, corr, dims=([-1], [0]))
-            sumCorr += (-1) ** k / (k + 1) * powerCorr
-
-        # Calculate final loss value
-        lossVal = -1.0 * mu * torch.trace(sumCorr)
+            # To implement InfoNCE contrastive terms correctly, first reweight the positive similarity loss by Tau
+            # Then add the contrastive loss terms for the 2 pairwise similarity tensors
+            lossVal /= self.winceTau
+            lossVal += self.winceBeta * (torch.exp(nds / self.winceTau) + torch.exp(nss / self.winceTau)).sum(dim=-1).log().mean()
 
         return lossVal
 
 
 class Barlow_Twins_Loss:
-    # Review for correctness - do batches need to be normalized in feature dim? double check multiplication
-    # Doublecheck hsic application
-    def __init__(self, btLam, lossForm='bt'):
-        self.btLam = btLam
-        self.lossForm = lossForm
+    # Implements Barlow Twins loss as in https://arxiv.org/abs/2103.03230 and https://arxiv.org/abs/2205.11508
+    # Also includes an optional loss modification as in https://arxiv.org/abs/2104.13712
 
-    def forward(self, batch1Prd, batch1Prj, batch2Prj):
+    def __init__(self, btLam=0.005, btLossType='bt'):
+        """
+        :param btLam: [float] - Coefficient for off-diagonal loss terms - Tsai 2021 paper on BT + HSIC recommends 1/d
+        :param btLossType: ['bt' or 'hsic'] - Method of calculating loss, particularly differs for off-diagonal terms
+        """
+        self.btLam = btLam # Note that the Tsai 2021 paper on HSIC + BT recommends setting btLam to 1/d
+        self.btLossType = btLossType
+        assert self.btLossType in ['bt', 'hsic']
 
-        device = torch.device(batch1Prd.get_device()) if batch1Prd.get_device() > -1 else torch.device('cpu')
-        prjDim = batch1Prd.size(-1)
+    def forward(self, batch1Prd, _, batch2Prj):
 
         # Batch normalize each batch
+        # Note that the Balestriero 2023 implementation of BT doesn't center the batches
         normBatch1 = (batch1Prd - batch1Prd.mean(dim=0, keepdim=True)) / batch1Prd.std(dim=0, unbiased=True, keepdim=True)
         normBatch2 = (batch2Prj - batch2Prj.mean(dim=0, keepdim=True)) / batch2Prj.std(dim=0, unbiased=True, keepdim=True)
 
-        # Redo the following but elegantly to use triu - saves time and device allocation
-        if self.lossForm == 'bt':
-            onesMat = -1.0 * torch.eye(prjDim, device=device)
-        elif self.lossForm == 'hsic':
-            onesMat = (torch.ones(prjDim, prjDim) - 2.0 * torch.eye(prjDim)).to(device)
-        offDiagMult = (self.btLam * torch.ones(prjDim, prjDim) + (1 - self.btLam) * torch.eye(prjDim)).to(device)
-
-        # Calculate cross-correlation and Barlow Twins cross-correlation loss
+        # Calculate cross-correlation
+        # Note that the Balestriero 2023 implementation of BT doesn't use the 1/N factor
         crossCorr = 1.0 / batch1Prd.size(0) * torch.tensordot(normBatch1, normBatch2, dims=([0], [0]))
-        lossVal = ((crossCorr + onesMat).pow(2) * offDiagMult).sum()
+
+        # Calculate Barlow Twins cross-correlation loss
+        if self.btLossType == 'bt':
+            lossVal = (torch.diag(crossCorr) - 1).square().sum() + 2 * self.btLam * torch.triu(crossCorr, 1).square().sum()
+        else:
+            lossVal = (torch.diag(crossCorr) - 1).square().sum() + 2 * self.btLam * (torch.triu(crossCorr, 1) + 1).square().sum()
 
         return lossVal
 
 
 class VICReg_Loss:
+    # Implements VICReg loss from https://arxiv.org/abs/2105.04906 and https://arxiv.org/abs/2205.11508
 
-    def __init__(self, alpha, beta, gamma):
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
+    def __init__(self, vicAlpha=25.0, vicBeta=25.0, vicGamma=1.0):
+        """
+        :param vicAlpha: [float] - Coefficient on variance loss
+        :param vicBeta: [float] - Coefficient on invariance loss
+        :param vicGamma: [float] - Coefficient on covariance loss
+        """
+        self.vicAlpha = vicAlpha
+        self.vicBeta = vicBeta
+        self.vicGamma = vicGamma
 
-    def forward(self, batch1Prd, batch1Prj, batch2Prj):
+    def forward(self, batch1Prd, _, batch2Prj):
 
         # Calculate covariance and covariance losses of batches 1 and 2
         b1Cov = torch.cov(batch1Prd.T)
@@ -258,13 +228,51 @@ class VICReg_Loss:
         cov2Loss = 2 / batch2Prj.size(1) * torch.triu(b2Cov, 1).square().sum()
 
         # Get variances from covariance matrices and calculate variance losses
-        var1Loss = 1 / batch1Prd.size(1) * (1 - torch.diag(batch1Prd).clamp(1e-6).sqrt()).clamp(0).sum()
-        var2Loss = 1 / batch2Prj.size(1) * (1 - torch.diag(batch2Prj).clamp(1e-6).sqrt()).clamp(0).sum()
+        var1Loss = 1 / batch1Prd.size(1) * (1 - torch.diag(b1Cov).clamp(1e-6).sqrt()).clamp(0).sum()
+        var2Loss = 1 / batch2Prj.size(1) * (1 - torch.diag(b2Cov).clamp(1e-6).sqrt()).clamp(0).sum()
 
         # Calculate L2 distance loss between encodings
         invLoss = 1 / batch1Prd.size(0) * torch.linalg.vector_norm(batch1Prd - batch2Prj, ord=2, dim=1).square().sum()
 
-        lossVal = self.alpha * (var1Loss + var2Loss) + self.beta * invLoss + self.gamma * (cov1Loss + cov2Loss)
+        lossVal = self.vicAlpha * (var1Loss + var2Loss) + self.vicBeta * invLoss + self.vicGamma * (cov1Loss + cov2Loss)
+
+        return lossVal
+
+
+class MEC_Loss:
+    # Implements Maximum Entropy Coding loss as in https://arxiv.org/abs/2210.11464
+
+    def __init__(self, mecEd2=0.06, mecTaylorTerms=2):
+        """
+        :param mecEd2: [float] - lam = d / (m * eps^2) = 1 / (m * ed2), so ed2 = eps^2 / d. Authors use ed2 = [0.01, 0.12]
+        :param mecTaylorTerms: [int] - Number of terms to use in Taylor expansion of the matrix logarithm
+        """
+        self.mecEd2 = mecEd2
+        self.mecTaylorTerms = mecTaylorTerms
+
+    def forward(self, batch1Prd, _, batch2Prj):
+
+        # Ensure batches are L2 normalized along feature dimension
+        batch1 = batch1Prd / torch.norm(batch1Prd, p=2, dim=1, keepdim=True)
+        batch2 = batch2Prj / torch.norm(batch2Prj, p=2, dim=1, keepdim=True)
+
+        # Calculate mu and lam coefficients
+        mu = (batch1.size(0) + batch1.size(1)) / 2
+        lam = 1 / (batch1.size(0) * self.mecEd2)
+
+        # Calculate correlation matrix and initialize the correlation exponential and Taylor sum
+        corr = lam * torch.tensordot(batch1, batch2, dims=([-1], [-1])) # [m x m] batch-wise correlation matrix
+        #corr = lam * torch.tensordot(batch1, batch2, dims=([0], [0])) # [d x d] feature-wise correlation matrix
+        powerCorr = torch.eye(corr.size(0), device=torch.device(batch1Prd.get_device()))
+        sumCorr = torch.zeros_like(corr)
+
+        # Loop through Taylor terms and cumulatively add powers of the correlation matrix
+        for k in range(self.mecTaylorTerms):
+            powerCorr = torch.tensordot(powerCorr, corr, dims=([-1], [0]))
+            sumCorr += (-1) ** k / (k + 1) * powerCorr
+
+        # Calculate final loss value
+        lossVal = -1.0 * mu * torch.trace(sumCorr)
 
         return lossVal
 

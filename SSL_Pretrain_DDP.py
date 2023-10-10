@@ -67,11 +67,21 @@ parser.add_argument('--prdEps', default=0.3, type=float, help='Optimal predictor
 parser.add_argument('--prdBeta', default=0.5, type=float, help='Optimal predictor correlation update momentum')
 parser.add_argument('--momEncBeta', default=0.0, type=float, help='Momentum encoder update momentum - set as 0.0 for no momentum encoder')
 parser.add_argument('--applySG', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to apply stop-gradient to one branch')
+
+# Loss parameters
 parser.add_argument('--symmetrizeLoss', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to apply loss function equally on both augmentation batches')
-parser.add_argument('--nceBeta', default=0.0, type=float, help='Contrastive term coefficient in InfoNCE loss - set as 0.0 for no contrastive term')
-parser.add_argument('--usePrd4CL', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to use predictor or projector output for contrastive term')
-parser.add_argument('--nceTau', default=0.1, type=float, help='Contrastive loss temperature factor')
-parser.add_argument('--downSamples', default=None, type=int, help='Number of samples to use for contrastive calculation - set as None to use full batch')
+parser.add_argument('--lossType', default='wince', type=str, help='Loss type to apply')
+parser.add_argument('--winceBeta', default=0.0, type=float, help='Contrastive term coefficient in InfoNCE loss - set as 0.0 for no contrastive term')
+parser.add_argument('--winceTau', default=0.1, type=float, help='Contrastive loss temperature factor')
+parser.add_argument('--winceUsePrd', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to use predictor or projector output for contrastive term')
+parser.add_argument('--winceDownSamp', default=None, type=int, help='Number of samples to use for contrastive calculation - set as None to use full batch')
+parser.add_argument('--btLam', default=0.005, type=float, help='Coefficient to apply to off-diagonal terms of BT loss')
+parser.add_argument('--btLossType', default='bt', type=str, help='Method of calculating loss for off-diagonal terms')
+parser.add_argument('--vicAlpha', default=25.0, type=float, help='Coefficient on variance loss term')
+parser.add_argument('--vicBeta', default=25.0, type=float, help='Coefficient on invariance loss term')
+parser.add_argument('--vicGamma', default=1.0, type=float, help='Coefficient on covariance loss term')
+parser.add_argument('--mecEd2', default=0.06, type=float, help='Related to the coefficient applied to correlation matrix')
+parser.add_argument('--mecTaylorTerms', default=2, type=int, help='Number of Taylor expansion terms to include in matrix logarithm approximation')
 
 ##################
 # Misc Functions #
@@ -129,6 +139,8 @@ def main():
         # 4GPU: batch of 512, split 128/GPU -> 4 * 2 augmented batches of 256 -> each of 256 samples has 255 negatives
         # SimCLR disallows multi-GPU training entirely, only allowing parallelizing on TPUs
         # CLIP accepts that the batch size is split across GPUs and doesn't call their loss "InfoNCE"
+
+    assert args.lossType in ['wince', 'bt', 'vicreg', 'mce']
 
     # Infer learning rate
     args.initLR = args.initLR * args.batchSize / 256
@@ -207,9 +219,18 @@ def main_worker(gpu, args):
     else:
         raise NotImplementedError('CPU training not supported')
 
-    # Instantiate loss function and custom optimizer that skips momentum encoder and applies decay
-    print('- Instantiating loss and optimizer')
-    lossFn = SSL_Model.Weighted_InfoNCE(args.nceBeta, args.usePrd4CL, args.nceTau, args.downSamples)
+    print('- Instantiating loss function')
+    if args.lossType == 'wince':
+        lossFn = SSL_Model.Weighted_InfoNCE_Loss(args.winceBeta, args.winceTau, args.winceUsePrd, args.winceDownSamp)
+    elif args.lossType == 'bt':
+        lossFn = SSL_Model.Barlow_Twins_Loss(args.btLam, args.btLossType)
+    elif args.lossType == 'vicreg':
+        lossFn = SSL_Model.VICReg_Loss(args.vicAlpha, args.vicBeta, args.vicGamma)
+    elif args.lossType == 'mec':
+        lossFn = SSL_Model.MEC_Loss(args.mecEd2, args.mecTaylorTerms)
+
+    # Instantiate custom optimizer that skips momentum encoder and applies decay
+    print('- Instantiating optimizer')
     if args.multiprocDistrib:
         optimParams = [{'params': model.module.encoder.parameters(), 'decayLR': args.decayEncLR},
                        {'params': model.module.projector.parameters(), 'decayLR': args.decayEncLR},
@@ -222,7 +243,7 @@ def main_worker(gpu, args):
     if args.useLARS:
         print("- Using LARS optimizer.")
         from Apex_LARC import LARC
-        optim = LARC(optimizer=optimizer, trust_coefficient=.001, clip=False)
+        optimizer = LARC(optimizer=optimizer, trust_coefficient=0.001, clip=False)
 
     # Optionally resume model/optimizer from checkpoint
     if args.loadChkPt is not None:
@@ -285,7 +306,7 @@ def main_worker(gpu, args):
                 lossVal = lossFn.forward(p1, z1, mz2)
 
             # Backpropagate
-            # momenc and optPrd not included in optimizer, but they don't use grads - no need to add model.zero_grad()
+            model.zero_grad()  # momenc and optPrd not included in optimizer, but they don't use grads - this should be redundant
             optimizer.zero_grad()
             lossVal.backward()
             optimizer.step()

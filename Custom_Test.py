@@ -15,12 +15,12 @@ import SSL_Model
 device = torch.device('cuda')
 
 # Load data
-dataRoot = r'D:/ImageNet-10/val'
+dataRoot = r'D:/CIFAR-10/Poisoned/TAP_untargeted'
 
 # Model data
-ptFile = r'Saved_Models/ImageNet-10/Clean_LR-0p5_BS-128_WD-1e-5/Clean_pt_0400.pth.tar'
-ftFile = r'Saved_Models/ImageNet-10/TAP_LR-0p5_BS-128_WD-1e-5/TAP_pt_0400_TAP_ft_0100.pth.tar'
-cropSize = 224
+ptFile = r'Saved_Models/CIFAR10/TAP_untargeted/SimSiam_1000_512_LR0p5_WD1e-4/SimSiam-TAP-1e-4_pt_1000.pth.tar'
+ftFile = r'Saved_Models/CIFAR10/TAP_untargeted/SimCLR_WD1e-4_INCE-Fix_He_Params/He-SimCLR-TAP_pt_1000_TAP_He_lp_0100.pth.tar'
+cropSize = 28
 
 batchSize = 256 # 256 for CIFAR, 4096 for IN1k
 epochBatches = 1e6

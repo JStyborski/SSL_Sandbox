@@ -208,7 +208,7 @@ def main_worker(gpu, args):
         if args.useLARS:
             print("- Using LARS optimizer.")
             from Apex_LARC import LARC
-            optimizer = LARC(optimizer=optimizer, trust_coefficient=.001, clip=False)
+            optimizer = LARC(optimizer=optimizer, trust_coefficient=0.001, clip=False)
 
         # Start timer
         timeStart = time.time()
