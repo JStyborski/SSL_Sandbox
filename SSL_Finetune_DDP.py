@@ -14,6 +14,7 @@ import torchvision.datasets as datasets
 
 import SSL_Transforms
 import SSL_Model
+from Adversarial import FGSM_PGD
 
 # CUDNN automatically searches for the best algorithm for processing a given model/optimizer/dataset
 cudnn.benchmark = True
@@ -36,7 +37,7 @@ parser.add_argument('--randSeed', default=None, type=int, help='RNG initial set 
 
 # Dataset parameters
 parser.add_argument('--ptDir', default='', type=str, help='Folder containing pretrained models')
-parser.add_argument('--ftType', default='ft', type=str, help='Type of finetuning to apply - linear probe or finetune')
+parser.add_argument('--ftType', default='lp', type=str, help='Type of finetuning to apply - linear probe or finetune')
 parser.add_argument('--trainRoot', default='', type=str, help='Training dataset root directory')
 parser.add_argument('--cropSize', default=224, type=int, help='Crop size to use for input images')
 parser.add_argument('--ftPrefix', default='', type=str, help='Prefix to add to finetuned file name')
@@ -52,6 +53,9 @@ parser.add_argument('--decayLR', default='cosdn', type=str, help='Learning rate 
 parser.add_argument('--decaySteps', default=[60, 80], type=list, help='Steps at which to apply stepdn decay')
 parser.add_argument('--decayFactor', default=0.1, type=float, help='Factor by which to multiply LR at step down')
 
+# Adversarial training parameters
+parser.add_argument('--advFT', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply adversarial training')
+
 #batchSize = 256 # 256 for CIFAR, 4096 for IN1k
 #initLR = 30 # 30 for CIFAR LP, 0.1 for CIFAR FT and IN1k LP
 #decayLR = 'stepdn' # None,'stepdn' (CIFAR LP), 'cosdn' (CIFAR FT and IN1k LP)
@@ -66,12 +70,14 @@ def main():
     args = parser.parse_args()
 
     # Overwrite defaults
-    #args.ptDir = 'Trained_Models'
-    #args.ftType = 'lp'
-    #args.trainRoot = 'D:/ImageNet-10/train'
-    #args.ftPrefix = 'Clean2'
-    #args.initLR = 0.1
-    #args.decayLR = 'cosdn'
+    args.ptDir = 'Trained_Models'
+    args.ftType = 'lp'
+    args.trainRoot = 'D:/CIFAR-10/train'
+    args.cropSize = 28
+    args.ftPrefix = 'Clean2'
+    args.initLR = 0.1
+    args.decayLR = 'cosdn'
+    args.advFT = True
 
     if args.randSeed is not None:
         random.seed(args.randSeed)
@@ -164,7 +170,7 @@ def main_worker(gpu, args):
 
         print('- Instantiating new model with {} backbone'.format(stateDict['encArch']))
         model = SSL_Model.Base_Model(stateDict['encArch'], stateDict['cifarMod'], stateDict['encDim'],
-                                     stateDict['prjHidDim'], stateDict['prjOutDim'], stateDict['prdDim'], None, 0.3, 0.5, 0.0)
+                                     stateDict['prjHidDim'], stateDict['prjOutDim'], stateDict['prdDim'], None, 0.3, 0.5, 0.0, True)
 
         print('- Loading model weights from {}'.format(stateFile))
         model.load_state_dict(stateDict['stateDict'], strict=False)
@@ -241,6 +247,12 @@ def main_worker(gpu, args):
                 # Get input tensor and truth labels
                 augTens = batch[0].cuda(args.gpu, non_blocking=True)
                 truthTens = batch[1].cuda(args.gpu, non_blocking=True)
+
+                # Untested: It can run and results seem okay but I haven't checked it carefully
+                if args.advFT:
+                    _, _, advTens = FGSM_PGD.sl_pgd(model, crossEnt, augTens, truthTens, 1/255, 8/255, float('inf'),
+                                                    args.batchSize, 5, 10, outIdx=0, targeted=False, rand_init=True)
+                    augTens = advTens.detach()
 
                 # Run augmented data through SimSiam with linear classifier
                 p, _, _, _ = model(augTens)

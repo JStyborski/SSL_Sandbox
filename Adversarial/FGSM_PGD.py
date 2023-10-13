@@ -87,14 +87,14 @@ def optimize_linear(grad, grad_idx, norm=np.inf):
     return eta
 
 
-def pgd(model, loss_fn, X, Y, alpha, eps, norm, batch_size, n_restarts, n_steps, outIdx=None, targeted=False,
-        rand_init=True, noise_mag=None, x_min=None, x_max=None):
+def sl_pgd(model, lossFn, X, Y, alpha, eps, norm, batch_size, n_restarts, n_steps, outIdx=None,
+           targeted=False, rand_init=True, noise_mag=None, x_min=None, x_max=None):
     """
     Implementation the Kurakin 2016 Basic Iterative Method (rand_init=False) or Madry 2017 PGD method (rand_init=True)
-    This function assumes that model and x are on same device, and that model is in desired mode
+    This function assumes that model and x are on same device
     Equivalent to FGSM if eps is high such that no limit is applied, rand_init = False, and n_restarts = perturb_steps = 1
     :param model: [function] [1] - Callable function that takes an input tensor and returns the model logits
-    :param loss_fn: [function] [1] - Callable function for calculating loss values per input - the loss function
+    :param lossFn: [function] [1] - Callable function for calculating loss values per input - the loss function
         should be initialized already with reduction='none' so that each input gets a loss
         - CrossEntropyLoss - Typical loss used for FGSM/PGD. The main issue is when logit magnitudes are large (e.g., 500)
         such that the softmax(logits) exponential is dominated by 1 term and the output distribution is a one-hot.
@@ -126,6 +126,9 @@ def pgd(model, loss_fn, X, Y, alpha, eps, norm, batch_size, n_restarts, n_steps,
     # Make a dataset and loader using the X and Y tensor inputs
     dataset = torch.utils.data.TensorDataset(X, Y)
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    # Ensure model doesn't update batchnorm or anything
+    model.eval()
 
     # Initialize the running variables, total loss and list of adversarial samples (for concatenation later)
     total_loss = 0.
@@ -160,10 +163,10 @@ def pgd(model, loss_fn, X, Y, alpha, eps, norm, batch_size, n_restarts, n_steps,
                 # Calculate loss and get loss gradient
                 # If attack is targeted, define loss such that gradient dL/dx will point towards target class
                 # else, define loss such that gradient dL/dx will point away from correct class
-                loss = loss_fn(model(x_adv), y) if outIdx is None else loss_fn(model(x_adv)[outIdx], y)
+                lossVal = lossFn(model(x_adv), y) if outIdx is None else lossFn(model(x_adv)[outIdx], y)
                 if targeted:
-                    loss = -loss
-                sumloss = torch.sum(loss)
+                    lossVal = -lossVal
+                sumloss = torch.sum(lossVal)
                 sumloss.backward()
 
                 # eta is the norm-constrained direction that maximizes dot(perturbation, x.grad)
@@ -184,14 +187,14 @@ def pgd(model, loss_fn, X, Y, alpha, eps, norm, batch_size, n_restarts, n_steps,
 
             # Compare the best loss so far to loss for this restart and take the better adversarial sample
             if i == 0:
-                best_loss = loss.detach()
+                best_loss = lossVal.detach()
                 x_adv_final = x_adv.detach()
             else:
                 if targeted:
-                    betterLossMask = loss.detach() < best_loss
+                    betterLossMask = lossVal.detach() < best_loss
                 else:
-                    betterLossMask = loss.detach() > best_loss
-                best_loss[betterLossMask] = loss[betterLossMask].detach()
+                    betterLossMask = lossVal.detach() > best_loss
+                best_loss[betterLossMask] = lossVal[betterLossMask].detach()
                 x_adv_final[betterLossMask, :] = x_adv[betterLossMask, :].detach()
 
         # Calculate loss for each sample and sum batch and append the adversarial tensor to list for concat later
@@ -203,4 +206,112 @@ def pgd(model, loss_fn, X, Y, alpha, eps, norm, batch_size, n_restarts, n_steps,
     advTens = torch.concatenate(adv_samples_list, dim=0).to(X.device)
 
     return avgLoss, (advTens - X), advTens
+
+
+def ssl_pgd(model, lossFn, X1, X2, alpha, eps, norm, n_restarts, n_steps, outIdx1=None, outIdx2=None,
+            useAdv1=True, useAdv2=False, targeted=False, rand_init=True, noise_mag=None, x_min=None, x_max=None):
+    """
+    Implementation the Kurakin 2016 Basic Iterative Method (rand_init=False) or Madry 2017 PGD method (rand_init=True)
+    This function assumes that model and x are on same device
+    Equivalent to FGSM if eps is high such that no limit is applied, rand_init = False, and n_restarts = perturb_steps = 1
+    :param model: [function] [1] - Callable function that takes an input tensor and returns the model logits
+    :param lossFn: [function] [1] - Callable function for calculating loss values per input - the loss function
+        should be initialized already with reduction='none' so that each input gets a loss
+        - CrossEntropyLoss - Typical loss used for FGSM/PGD. The main issue is when logit magnitudes are large (e.g., 500)
+        such that the softmax(logits) exponential is dominated by 1 term and the output distribution is a one-hot.
+        If the one-hot is correct, then CE loss is 0, then the gradient is 0, then eta is 0, the x_adv = x.
+        Typical remedies are to L2 normalize logits or use NLLLoss (below)
+        - NLLLoss - Not typically used for FGSM/PGD. This essentially returns the negative of the correct logit as loss.
+    :param X1: [Pytorch tensor] [m x n] - Nominal input tensor
+    :param X2: [tensor] [m x n] - Tensor with truth labels
+    :param alpha: [float] [1] - Input variation parameter, see https://arxiv.org/abs/1412.6572
+    :param eps: [float] [1] - Norm constraint bound for adversarial example
+    :param norm: [float] [1] - Order of the norm (mimics NumPy)
+    :param batch_size: [int] [1] - Number of samples to calculate loss for at once
+    :param n_restarts: [int] [1] - Number of PGD restarts
+    :param n_steps: [int] [1] - Number of PGD steps
+    :param outIdx: [int] [1] - Index corresponding to the desired output (set as None for only 1 output)
+    :param targeted: [Bool] [1] - Whether to direct the adversarial attack towards a specific label/target
+    :param rand_init: [Bool] [1] - Whether to start adversarial search with random offset
+    :param noise_mag: [float] [1] - Maximum random initial perturbation magnitude
+    :param x_min: [float] [1] - Minimum value of x_adv (useful for ensuring images are useable)
+    :param x_max: [float] [1] - Maximum value of x_adv (useful for ensuring images are useable)
+    :return: a tensor for the adversarial example
+    """
+
+    if norm not in [np.inf, 1, 2]:
+        raise ValueError(f'Unsupported norm {norm}')
+    if norm == 1:
+        print('Warning: FGM may not be a good inner loop step, because norm=1 FGM only changes 1 pixel at a time')
+
+    # Ensure model doesn't update batchnorm or anything
+    model.eval()
+
+    x1 = X1.detach()
+    x2 = X2.detach()
+
+    for i in range(n_restarts):
+
+        # Apply random initial perturbation to input (or don't)
+        if rand_init and useAdv1:
+            if noise_mag is None:
+                noise_mag = eps
+            noise = torch.zeros_like(x1).uniform_(-noise_mag, noise_mag)
+            noise = clip_tens(noise, list(range(1, len(noise.size()))), norm, eps)
+            x1_adv = x1 + noise.to(x1.device)
+        else:
+            x1_adv = x1
+
+        if rand_init and useAdv2:
+            if noise_mag is None:
+                noise_mag = eps
+            noise = torch.zeros_like(x2).uniform_(-noise_mag, noise_mag)
+            noise = clip_tens(noise, list(range(1, len(noise.size()))), norm, eps)
+            x2_adv = x2 + noise.to(x2.device)
+        else:
+            x2_adv = x2
+
+        # Ensure x_adv elements within appropriate bounds
+        if x_min is not None or x_max is not None:
+            x1_adv = torch.clamp(x1_adv, x_min, x_max)
+            x2_adv = torch.clamp(x2_adv, x_min, x_max)
+
+        for _ in range(n_steps):
+
+            # Reset the gradients of the adversarial input and model
+            x1_adv = x1_adv.detach()
+            x2_adv = x2_adv.detach()
+            if useAdv1:
+                x1_adv.requires_grad = True
+            if useAdv2:
+                x2_adv.requires_grad = True
+            model.zero_grad()
+
+            # Calculate outputs and loss
+            out1 = model(x1_adv) if outIdx1 is None else model(x1_adv)[outIdx1]
+            out2 = model(x2_adv) if outIdx2 is None else model(x2_adv)[outIdx2]
+            lossVal = lossFn.forward(out1, out2)
+            if targeted:
+                lossVal = -lossVal
+            lossVal.backward()
+
+            # Update adversarial inputs
+            if useAdv1:
+                eta = optimize_linear(x1_adv.grad, list(range(1, len(x1_adv.grad.size()))), norm)
+                x1_adv = x1_adv.data + alpha * eta
+                eta = clip_tens(x1_adv - x1, list(range(1, len(x1.size()))), norm, eps)
+                x1_adv = x1 + eta
+            if useAdv2:
+                eta = optimize_linear(x2_adv.grad, list(range(1, len(x2_adv.grad.size()))), norm)
+                x2_adv = x2_adv.data + alpha * eta
+                eta = clip_tens(x2_adv - x2, list(range(1, len(x2.size()))), norm, eps)
+                x2_adv = x2 + eta
+
+            # Ensure x_adv elements within appropriate bounds
+            if x_min is not None or x_max is not None:
+                x1_adv = torch.clamp(x1_adv, x_min, x_max)
+                x2_adv = torch.clamp(x2_adv, x_min, x_max)
+
+
+    return lossVal / len(X1), x1_adv - X1, x2_adv - X2, x1_adv, x2_adv
 

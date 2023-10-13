@@ -16,13 +16,15 @@ def reset_model_weights(layer):
 
 
 class Base_Model(nn.Module):
-    def __init__(self, encArch=None, cifarMod=False, encDim=512, prjHidDim=2048, prjOutDim=2048, prdDim=512, prdAlpha=None, prdEps=0.3, prdBeta=0.5, momEncBeta=0):
+    def __init__(self, encArch=None, cifarMod=False, encDim=512, prjHidDim=2048, prjOutDim=2048, prdDim=512,
+                 prdAlpha=None, prdEps=0.3, prdBeta=0.5, momEncBeta=0, applySG=True):
         super(Base_Model, self).__init__()
         self.prdAlpha = prdAlpha
         self.prdEps = prdEps
         self.prdBeta = prdBeta
         self.momZCor = None  # Initialize momentum correlation matrix as None (overwritten later)
         self.momEncBeta = momEncBeta
+        self.applySG = applySG
 
         self.encoder = models.__dict__[encArch](num_classes=encDim, zero_init_residual=True)
         self.encoder.fc = nn.Identity(encDim)
@@ -89,6 +91,10 @@ class Base_Model(nn.Module):
         else:
             mz = z
 
+        # Apply stop-gradient to second branch
+        if self.applySG:
+            mz = mz.detach()
+
         return p, z, r, mz
 
     def calculate_optimal_predictor(self, z):
@@ -134,19 +140,17 @@ class Base_Model(nn.Module):
 class Weighted_InfoNCE_Loss:
     # Implements weighted InfoNCE loss as in https://arxiv.org/abs/2006.07733 and based on https://arxiv.org/abs/2002.05709
 
-    def __init__(self, winceBeta=0.0, winceTau=0.1, winceUsePrd=True, winceDownSamp=None):
+    def __init__(self, winceBeta=0.0, winceTau=0.1, winceDownSamp=None):
         """
         :param winceBeta: [float] - Coefficient weight for contrastive loss term (0 gives SimSiam loss, 1 gives InfoNCE)
         :param winceTau: [float] - Temperature term used in InfoNCE loss
-        :param winceUsePrd: [bool] - Boolean to use predictor output or projector output for contrastive comparison
         :param winceDownSamp: [int] - Number of samples to use in contrastive comparison
         """
         self.winceBeta = winceBeta
         self.winceTau = winceTau
-        self.winceUsePrd = winceUsePrd
         self.winceDownSamp = winceDownSamp
 
-    def forward(self, batch1Prd, batch1Prj, batch2Prj):
+    def forward(self, batch1Prd, batch2Prj):
 
         # Positive similarity loss (InfoNCE numerator)
         lossVal = -1.0 * cosine_similarity(batch1Prd, batch2Prj, reduction='mean')
@@ -154,14 +158,12 @@ class Weighted_InfoNCE_Loss:
         # Negative similarity loss (InfoNCE denominator) - This formulation is best seen in the BYOL paper
         if self.winceBeta > 0.0:
 
-            batch1 = batch1Prd if self.winceUsePrd else batch1Prj
-
             # Use a subset of the contrastive samples for loss calc (if specified)
-            lossSamples = self.winceDownSamp if self.winceDownSamp is not None else batch1.size(0)
+            lossSamples = self.winceDownSamp if self.winceDownSamp is not None else batch1Prd.size(0)
 
             # Calculate the pairwise cossim matrices for b1 x b2 and b1 x b1 (using matrix mult on normalized matrices)
-            nds = pairwise_cosine_similarity(batch1[:lossSamples, :], batch2Prj[:lossSamples, :])
-            nss = pairwise_cosine_similarity(batch1[:lossSamples, :], batch1[:lossSamples, :])
+            nds = pairwise_cosine_similarity(batch1Prd[:lossSamples, :], batch2Prj[:lossSamples, :])
+            nss = pairwise_cosine_similarity(batch1Prd[:lossSamples, :], batch1Prd[:lossSamples, :])
             nss.fill_diagonal_(0.0)  # Self-similarity within batch skips itself (similarity = 1 otherwise)
             #nds.fill_diagonal_(0.0) # Not canon, but it's sensible and slightly improves performance
 
@@ -186,7 +188,7 @@ class Barlow_Twins_Loss:
         self.btLossType = btLossType
         assert self.btLossType in ['bt', 'hsic']
 
-    def forward(self, batch1Prd, _, batch2Prj):
+    def forward(self, batch1Prd, batch2Prj):
 
         # Batch normalize each batch
         # Note that the Balestriero 2023 implementation of BT doesn't center the batches
@@ -219,7 +221,7 @@ class VICReg_Loss:
         self.vicBeta = vicBeta
         self.vicGamma = vicGamma
 
-    def forward(self, batch1Prd, _, batch2Prj):
+    def forward(self, batch1Prd, batch2Prj):
 
         # Calculate covariance and covariance losses of batches 1 and 2
         b1Cov = torch.cov(batch1Prd.T)
@@ -250,7 +252,7 @@ class MEC_Loss:
         self.mecEd2 = mecEd2
         self.mecTaylorTerms = mecTaylorTerms
 
-    def forward(self, batch1Prd, _, batch2Prj):
+    def forward(self, batch1Prd, batch2Prj):
 
         # Ensure batches are L2 normalized along feature dimension
         batch1 = batch1Prd / torch.norm(batch1Prd, p=2, dim=1, keepdim=True)

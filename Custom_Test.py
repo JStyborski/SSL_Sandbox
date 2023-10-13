@@ -43,7 +43,7 @@ ptStateDict = torch.load(ptFile, map_location='cuda:{}'.format(0))
 
 # Create model and load model weights
 model = SSL_Model.Base_Model(ptStateDict['encArch'], ptStateDict['cifarMod'], ptStateDict['encDim'],
-                             ptStateDict['prjHidDim'], ptStateDict['prjOutDim'], ptStateDict['prdDim'], None, 0.3, 0.5, 0.0)
+                             ptStateDict['prjHidDim'], ptStateDict['prjOutDim'], ptStateDict['prdDim'], None, 0.3, 0.5, 0.0, True)
 
 # Replace the projector with identity and the predictor with linear classifier
 model.projector = nn.Identity(ptStateDict['encDim'])

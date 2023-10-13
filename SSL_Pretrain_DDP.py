@@ -15,6 +15,7 @@ import SSL_Dataset
 import SSL_Transforms
 import SSL_Model
 import SSL_Probes
+from Adversarial import FGSM_PGD
 
 # CUDNN automatically searches for the best algorithm for processing a given model/optimizer/dataset
 cudnn.benchmark = True
@@ -73,7 +74,6 @@ parser.add_argument('--symmetrizeLoss', default=True, type=lambda x:bool(strtobo
 parser.add_argument('--lossType', default='wince', type=str, help='Loss type to apply')
 parser.add_argument('--winceBeta', default=0.0, type=float, help='Contrastive term coefficient in InfoNCE loss - set as 0.0 for no contrastive term')
 parser.add_argument('--winceTau', default=0.1, type=float, help='Contrastive loss temperature factor')
-parser.add_argument('--winceUsePrd', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to use predictor or projector output for contrastive term')
 parser.add_argument('--winceDownSamp', default=None, type=int, help='Number of samples to use for contrastive calculation - set as None to use full batch')
 parser.add_argument('--btLam', default=0.005, type=float, help='Coefficient to apply to off-diagonal terms of BT loss')
 parser.add_argument('--btLossType', default='bt', type=str, help='Method of calculating loss for off-diagonal terms')
@@ -82,6 +82,9 @@ parser.add_argument('--vicBeta', default=25.0, type=float, help='Coefficient on 
 parser.add_argument('--vicGamma', default=1.0, type=float, help='Coefficient on covariance loss term')
 parser.add_argument('--mecEd2', default=0.06, type=float, help='Related to the coefficient applied to correlation matrix')
 parser.add_argument('--mecTaylorTerms', default=2, type=int, help='Number of Taylor expansion terms to include in matrix logarithm approximation')
+
+# Adversarial training parameters
+parser.add_argument('--advPT', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply adversarial training')
 
 ##################
 # Misc Functions #
@@ -118,6 +121,7 @@ def main():
     args.nceTau = 0.5
     args.prdDim = 0
     args.applySG = False
+    args.advPT = False
 
     if args.randSeed is not None:
         random.seed(args.randSeed)
@@ -198,7 +202,7 @@ def main_worker(gpu, args):
 
     print('- Instantiating new model with {} backbone'.format(args.encArch))
     model = SSL_Model.Base_Model(args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
-                                 args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta)
+                                 args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG)
 
     print('- Setting up model on single/multiple devices')
     if args.multiprocDistrib:
@@ -221,7 +225,7 @@ def main_worker(gpu, args):
 
     print('- Instantiating loss function')
     if args.lossType == 'wince':
-        lossFn = SSL_Model.Weighted_InfoNCE_Loss(args.winceBeta, args.winceTau, args.winceUsePrd, args.winceDownSamp)
+        lossFn = SSL_Model.Weighted_InfoNCE_Loss(args.winceBeta, args.winceTau, args.winceDownSamp)
     elif args.lossType == 'bt':
         lossFn = SSL_Model.Barlow_Twins_Loss(args.btLam, args.btLossType)
     elif args.lossType == 'vicreg':
@@ -290,20 +294,23 @@ def main_worker(gpu, args):
             aug1Tens = batch[0][0].cuda(args.gpu, non_blocking=True)
             aug2Tens = batch[0][1].cuda(args.gpu, non_blocking=True)
 
+            # Untested: It can run and results seem okay but I haven't checked it carefully
+            if args.advPT:
+                _, _, _, adv1Tens, adv2Tens = FGSM_PGD.ssl_pgd(model, lossFn, aug1Tens, aug2Tens, 1/255, 8/255, float('inf'),
+                                                               5, 10, outIdx1=0, outIdx2=3, useAdv1=True, useAdv2=False,
+                                                               targeted=False, rand_init=True)
+                aug1Tens = adv1Tens.detach()
+                aug2Tens = adv2Tens.detach()
+
             # Run each augmented batch through encoder, projector, predictor, and momentum encoder/projector
             p1, z1, r1, mz1 = model(aug1Tens)
             p2, z2, r2, mz2 = model(aug2Tens)
 
-            # Apply stop-gradient
-            if args.applySG:
-                mz1 = mz1.detach()
-                mz2 = mz2.detach()
-
             # Calculate loss
             if args.symmetrizeLoss:
-                lossVal = 0.5 * (lossFn.forward(p1, z1, mz2) + lossFn.forward(p2, z2, mz1))
+                lossVal = 0.5 * (lossFn.forward(p1, mz2) + lossFn.forward(p2, mz1))
             else:
-                lossVal = lossFn.forward(p1, z1, mz2)
+                lossVal = lossFn.forward(p1, mz2)
 
             # Backpropagate
             model.zero_grad()  # momenc and optPrd not included in optimizer, but they don't use grads - this should be redundant
@@ -361,25 +368,26 @@ def main_worker(gpu, args):
 
         epochList = list(range(1, args.nEpochs + 1))
 
-        print([probes.lossProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.r1r2AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.r1AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.r1VarProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.r1CorrStrProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.r1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.p1EntropyProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.mz2EntropyProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.mz2p1KLDivProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.p1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.z1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.mz2EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.p1z1EigAlignProbe.storeList[epIdx - 1] for epIdx in epochList])
-        print([probes.p1mz2EigAlignProbe.storeList[epIdx - 1] for epIdx in epochList])
-
-        print(np.log(probes.p1EigProbe.storeList[-1]).tolist())
-        print(np.log(probes.mz2EigProbe.storeList[-1]).tolist())
-        print(np.log(probes.r1EigProbe.storeList[-1]).tolist())
-
+        import csv
+        writer = csv.writer(open('Pretrain_Output.csv', 'w', newline=''))
+        writer.writerow(['Epoch'] + epochList)
+        writer.writerow(['Loss'] + [probes.lossProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['R1-R2 Sim'] + [probes.r1r2AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['R1 SelfSim'] + [probes.r1AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['R1 Var'] + [probes.r1VarProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['R1 Corr Str'] + [probes.r1CorrStrProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['R1 E-Rank'] + [probes.r1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['P1 Entropy'] + [probes.p1EntropyProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['MZ2 Entropy'] + [probes.mz2EntropyProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['MZ2-P1 KL Div'] + [probes.mz2p1KLDivProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['P1 E-Rank'] + [probes.p1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['Z1 E-Rank'] + [probes.z1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['MZ2 E-Rank'] + [probes.mz2EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['P1-Z1 Eig Align'] + [probes.p1z1EigAlignProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['P1-MZ2 Eig Align'] + [probes.p1mz2EigAlignProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['P1 Eig'] + np.log(probes.p1EigProbe.storeList[-1]).tolist())
+        writer.writerow(['MZ2 Eig'] + np.log(probes.mz2EigProbe.storeList[-1]).tolist())
+        writer.writerow(['R1 Eig'] + np.log(probes.r1EigProbe.storeList[-1]).tolist())
 
 if __name__ == '__main__':
     main()

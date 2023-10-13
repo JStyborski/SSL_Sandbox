@@ -2,3 +2,5 @@
 *.tar
 __pycache__/
 .idea/
+*.pyc
+*.csv

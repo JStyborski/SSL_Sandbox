@@ -63,7 +63,7 @@ def maximize_local_lip(model, X, alpha=0.003, eps=0.01, top_norm=1, bot_norm=np.
     """
     Iteratively search for input that maximizes local Lipschitz within a specified radius
     This function is similar to the FGSM_PGD script in the same folder, but modified to accommodate Lipschitz as loss
-    This function assumes that model and X are on same device, and that model is in desired mode
+    This function assumes that model and X are on same device
     :param model: [Pytorch Model] [] - Callable object that takes an input and returns an output encoding
     :param X: [Pytorch tensor] [m x n] - Nominal input tensor
     :param alpha: [float] [1] - Adversarial sample step size
@@ -81,12 +81,15 @@ def maximize_local_lip(model, X, alpha=0.003, eps=0.01, top_norm=1, bot_norm=np.
     :return avgLolip: [float] [1] - Average final local Lipschitz values across input samples
     :return advTens: [Pytorch tensor] [m x n] - Final adversarial samples tensor
     """
-
-    # Instantiate Local_Lip_Loss
-    lll = Local_Lip_Loss(top_norm, bot_norm, 'none')
     
     # Make a loader using the X tensor input
     loader = torch.utils.data.DataLoader(X, batch_size=batch_size, shuffle=False)
+
+    # Ensure model doesn't update batchnorm or anything
+    model.eval()
+
+    # Instantiate Local_Lip_Loss
+    lll = Local_Lip_Loss(top_norm, bot_norm, 'none')
     
     # Initialize the running variables, total lolip and list of adversarial samples (for concatenation later)
     total_lolip = 0.

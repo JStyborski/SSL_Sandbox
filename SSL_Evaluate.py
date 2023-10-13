@@ -16,8 +16,8 @@ import SSL_Probes
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Load data
-trainRoot = r'D:/CIFAR-10/Poisoned/AR_l2'
-testRoot = r'D:/CIFAR-10/test'
+trainRoot = r'D:/ImageNet-10/train'
+testRoot = r'D:/ImageNet-10/val'
 
 # Find pretrained models
 dirName = 'Trained_Models'
@@ -27,7 +27,7 @@ ptList = sorted([dirName + '/' + stateFile for stateFile in fileList
 ftType = 'lp' # 'lp' or 'ft'
 
 # Data parameters
-cropSize = 28
+cropSize = 224
 
 # Nominal batch size for evaluation
 batchSize = 512
@@ -40,6 +40,8 @@ knnBankBatches = repBankBatches
 knnTestBatches = 5
 k = 20
 
+evalFinetune = True
+
 # LinCls parameters
 trainAccBatches = 1e6
 testAccBatches = 1e6
@@ -48,7 +50,7 @@ testAccBatches = 1e6
 atkSamples = 1024
 atkBatchSize = 32
 advAlpha = 1/255
-advEps = 5/255
+advEps = 8/255
 advRestarts = 5
 advSteps = 10
 randInit = True
@@ -191,7 +193,7 @@ def adv_attack(loader, model, lossfn):
     model.zero_grad()
 
     # Attack batch of images with FGSM or PGD and calculate accuracy
-    avgAdvLoss, perturbTens, advTens = FGSM_PGD.pgd(model, lossfn, augTens, truthTens, advAlpha, advEps, np.inf,
+    avgAdvLoss, perturbTens, advTens = FGSM_PGD.sl_pgd(model, lossfn, augTens, truthTens, advAlpha, advEps, np.inf,
                                                     atkBatchSize, advRestarts, advSteps, 0, False, randInit)
     advAcc = torch.sum(torch.argmax(model(advTens)[0].detach(), dim=1) == truthTens).cpu().numpy() / advTens.size(0)
 
@@ -219,7 +221,7 @@ for stateFile in ptList:
 
     # Create model and load model weights
     model = SSL_Model.Base_Model(ptStateDict['encArch'], ptStateDict['cifarMod'], ptStateDict['encDim'],
-                                 ptStateDict['prjHidDim'], ptStateDict['prjOutDim'], ptStateDict['prdDim'], None, 0.3, 0.5, 0.0)
+                                 ptStateDict['prjHidDim'], ptStateDict['prjOutDim'], ptStateDict['prdDim'], None, 0.3, 0.5, 0.0, True)
     model.load_state_dict(ptStateDict['stateDict'], strict=False)
 
     # Replace the projector with identity and the predictor with linear classifier
@@ -237,7 +239,6 @@ for stateFile in ptList:
     repBank, labelBank = make_rep_bank(knnTrainLoader, batchSize, model, ptStateDict['encDim'], repBankBatches)
 
     # Evaluate representation smoothness
-    model.zero_grad()
     avgRepLolip = calculate_smoothness(atkLoader, model)
 
     # Evaluate KNN accuracy of the model
@@ -254,7 +255,7 @@ for stateFile in ptList:
     ptPrefix = (stateFile[:-8] + '_').split('/')[1]
     ftPrefix = '_' + ftType + '_'
     ftFiles = sorted([dirName + '/' + file for file in fileList if (ptPrefix in file and ftPrefix in file)])
-    if len(ftFiles) > 0:
+    if evalFinetune and len(ftFiles) > 0:
 
         print('Evaluating ' + ftFiles[-1])
 
@@ -278,7 +279,6 @@ for stateFile in ptList:
         print('Test Accuracy: {:0.4f}'.format(clnTestAcc))
 
         # Evaluate adversarial accuracy
-        model.zero_grad()
         advAcc = adv_attack(atkLoader, model, nn.NLLLoss(reduction='none'))
         print('Adv Accuracy: {:0.4f}'.format(advAcc))
 
@@ -297,10 +297,13 @@ for stateFile in ptList:
 
 #probes.plot_probes()
 
-print(np.log(probes.repEigProbe.storeList[-1]).tolist())
-print(probes.repEigERankProbe.storeList)
-print(probes.repLolipProbe.storeList)
-print(probes.knnAccProbe.storeList)
-print(probes.clnTrainAccProbe.storeList)
-print(probes.clnTestAccProbe.storeList)
-print(probes.advAccProbe.storeList)
+import csv
+writer = csv.writer(open('Evaluate_Output.csv', 'w', newline=''))
+writer.writerow(['R1 Eig'] + np.log(probes.repEigProbe.storeList[-1]).tolist())
+writer.writerow(['R1 E-Rank'] + probes.repEigERankProbe.storeList)
+writer.writerow(['R1 Local Lip'] + probes.repLolipProbe.storeList)
+writer.writerow(['KNN Acc'] + probes.knnAccProbe.storeList)
+writer.writerow(['Train Acc'] + probes.clnTrainAccProbe.storeList)
+writer.writerow(['Clean Test Acc'] + probes.clnTestAccProbe.storeList)
+writer.writerow(['Adv Acc'] + probes.advAccProbe.storeList)
+
