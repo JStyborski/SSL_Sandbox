@@ -37,24 +37,33 @@ parser.add_argument('--randSeed', default=None, type=int, help='RNG initial set 
 
 # Dataset parameters
 parser.add_argument('--ptDir', default='', type=str, help='Folder containing pretrained models')
-parser.add_argument('--ftType', default='lp', type=str, help='Type of finetuning to apply - linear probe or finetune')
 parser.add_argument('--trainRoot', default='', type=str, help='Training dataset root directory')
-parser.add_argument('--cropSize', default=224, type=int, help='Crop size to use for input images')
 parser.add_argument('--ftPrefix', default='', type=str, help='Prefix to add to finetuned file name')
+parser.add_argument('--ftType', default='lp', type=str, help='Type of finetuning to apply - linear probe or finetune')
+parser.add_argument('--cropSize', default=224, type=int, help='Crop size to use for input images')
+parser.add_argument('--nAugs', default=1, type=int, help='Number of augmentations to apply to each batch')
 
 # Training parameters
 parser.add_argument('--nEpochs', default=100, type=int, help='Number of epochs to run')
-parser.add_argument('--batchSize', default=256, type=int, help='Data loader batch size')
+parser.add_argument('--batchSize', default=512, type=int, help='Data loader batch size')
 parser.add_argument('--momentum', default=0.9, type=float, help='SGD momentum value')
 parser.add_argument('--weightDecay', default=0, type=float, help='SGD weight decay value')
-parser.add_argument('--initLR', default=0.1, type=float, help='SGD initial learning rate')
+parser.add_argument('--initLR', default=5.0, type=float, help='SGD initial learning rate')
 parser.add_argument('--useLARS', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply LARS optimizer')
-parser.add_argument('--decayLR', default='cosdn', type=str, help='Learning rate decay method')
-parser.add_argument('--decaySteps', default=[60, 80], type=list, help='Steps at which to apply stepdn decay')
-parser.add_argument('--decayFactor', default=0.1, type=float, help='Factor by which to multiply LR at step down')
+parser.add_argument('--decayLR', default='stepdn', type=str, help='Learning rate decay method')
+parser.add_argument('--decaySteps', default=[60, 75, 90], type=list, help='Steps at which to apply stepdn decay')
+parser.add_argument('--decayFactor', default=0.2, type=float, help='Factor by which to multiply LR at step down')
 
 # Adversarial training parameters
 parser.add_argument('--advFT', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply adversarial training')
+parser.add_argument('--keepStd', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to train with the adversarial plus original images - increases batch size')
+parser.add_argument('--advBatchSize', default=512, type=int, help='Batch size to use for adversarial training loader')
+parser.add_argument('--advAlpha', default=1/255, type=float, help='PGD step size')
+parser.add_argument('--advEps', default=8/255, type=float, help='PGD attack radius limit, measured in specified norm')
+parser.add_argument('--advNorm', default=float('inf'), type=float, help='Norm type for measuring perturbation radius')
+parser.add_argument('--advSteps', default=10, type=int, help='Number of PGD steps to take')
+parser.add_argument('--advNoise', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to use random initialization')
+parser.add_argument('--advRestarts', default=1, type=int, help='Number of PGD restarts to search for best attack')
 
 #batchSize = 256 # 256 for CIFAR, 4096 for IN1k
 #initLR = 30 # 30 for CIFAR LP, 0.1 for CIFAR FT and IN1k LP
@@ -71,13 +80,16 @@ def main():
 
     # Overwrite defaults
     args.ptDir = 'Trained_Models'
-    args.ftType = 'lp'
-    args.trainRoot = 'D:/CIFAR-10/train'
-    args.cropSize = 28
-    args.ftPrefix = 'Clean2'
+    args.ftType = 'ft'
     args.initLR = 0.1
     args.decayLR = 'cosdn'
+    #args.trainRoot = 'D:/CIFAR-10/Poisoned/TAP_untargeted'
+    args.trainRoot = 'D:/CIFAR-10/train'
+    args.ftPrefix = 'Clean'
+    args.cropSize = 28
+    args.nAugs = 1
     args.advFT = True
+    args.keepStd = True
 
     if args.randSeed is not None:
         random.seed(args.randSeed)
@@ -89,7 +101,6 @@ def main():
 
     if not args.multiprocDistrib:
         warnings.warn('You have disabled DDP - the model will train on 1 GPU without data parallelism')
-
 
     # Infer learning rate
     args.initLR = args.initLR * args.batchSize / 256
@@ -135,7 +146,8 @@ def main_worker(gpu, args):
         torch.distributed.barrier()
 
     print('Defining dataset and loader')
-    trainDataset = datasets.ImageFolder(args.trainRoot, SSL_Transforms.MoCoV2Transform('finetune', args.cropSize))
+    #trainDataset = datasets.ImageFolder(args.trainRoot, SSL_Transforms.MoCoV2Transform('finetune', args.cropSize))
+    trainDataset = datasets.ImageFolder(args.trainRoot, SSL_Transforms.NTimesTransform(args.nAugs, SSL_Transforms.MoCoV2Transform('finetune', args.cropSize)))
     if args.multiprocDistrib:
         trainSampler = torch.utils.data.distributed.DistributedSampler(trainDataset)
         # When using single GPU per process and per DDP, need to divide batch size and workers based on nGPUs
@@ -244,18 +256,32 @@ def main_worker(gpu, args):
 
             for batchI, batch in enumerate(trainLoader):
 
-                # Get input tensor and truth labels
-                augTens = batch[0].cuda(args.gpu, non_blocking=True)
+                # Get truth labels and reset predictions list
+                pList = []
                 truthTens = batch[1].cuda(args.gpu, non_blocking=True)
 
-                # Untested: It can run and results seem okay but I haven't checked it carefully
-                if args.advFT:
-                    _, _, advTens = FGSM_PGD.sl_pgd(model, crossEnt, augTens, truthTens, 1/255, 8/255, float('inf'),
-                                                    args.batchSize, 5, 10, outIdx=0, targeted=False, rand_init=True)
-                    augTens = advTens.detach()
+                # Loop through each of the augs and create a list of results
+                for aug in batch[0]:
 
-                # Run augmented data through SimSiam with linear classifier
-                p, _, _, _ = model(augTens)
+                    # Get input tensor
+                    augTens = aug.cuda(args.gpu, non_blocking=True)
+
+                    # Calculate (untargeted) adversarial samples from inputs and use for training
+                    if args.advFT:
+                        _, _, advTens = FGSM_PGD.sl_pgd(model, nn.CrossEntropyLoss(reduction='none'), augTens, truthTens,
+                                                        args.advAlpha, args.advEps, args.advNorm, args.advRestarts, args.advSteps,
+                                                        args.advBatchSize, outIdx=0, targeted=False, rand_init=args.advNoise)
+                        if args.keepStd:
+                            augTens = torch.cat((augTens, advTens.detach()), dim=0).cuda(args.gpu, non_blocking=True)
+                        else:
+                            augTens = advTens.detach()
+
+                    # Run augmented data through SimSiam with linear classifier
+                    p, _, _, _ = model(augTens)
+                    pList.append(p)
+
+                p = torch.concatenate(pList, dim=0).cuda(args.gpu, non_blocking=True)
+                truthTens = truthTens.repeat(int(len(p) / len(truthTens)))
 
                 # Calculate loss
                 lossVal = crossEnt(p, truthTens)
@@ -268,7 +294,7 @@ def main_worker(gpu, args):
                 # Keep running sum of loss
                 sumLossVal += lossVal.detach().cpu().numpy()
                 nTrainCorrect += torch.sum(torch.argmax(p.detach(), dim=1) == truthTens).cpu().numpy()
-                nTrainTotal += batch[0].size(0)
+                nTrainTotal += len(truthTens)
 
             avgLossVal = sumLossVal / (batchI + 1)
             clnTrainAcc = nTrainCorrect / nTrainTotal

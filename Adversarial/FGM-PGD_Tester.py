@@ -18,13 +18,13 @@ imgDir = 'Source_Images'
 imgName = 'giant_panda.JPEG'
 
 norm = np.inf
-eps = 0.5 # Maximum eta norm
-alpha = 0.005 # Eta multiplier when added to image
+eps = 8/255 # Maximum eta norm
+alpha = 1/255 # Eta multiplier when added to image
 n_restarts = 1
-nb_iter = 5 # Number of PGD iters
+n_steps = 10 # Number of PGD iters
 rand_init = False
 
-targeted = True
+targeted = False
 targLabel = 'bucket'
 
 #testTens = torch.tensor(np.random.rand(2,2,3,3))
@@ -82,6 +82,7 @@ else:
     targIdx = trueIdx
 labelTens = torch.Tensor(1, 1000).fill_(0).to(device)
 labelTens[0, targIdx] = 1
+#labelTens = torch.LongTensor(1).fill_(targIdx).to(device)
 
 ################
 # Define Model #
@@ -100,8 +101,8 @@ loss = torch.nn.CrossEntropyLoss(reduction='none')
 ###############
 
 batch_size=1
-_, perturb, x_adv = pgd(model, loss, imgTens, labelTens, alpha, eps, norm, batch_size, n_restarts, nb_iter,
-                     targeted=targeted, rand_init=rand_init, noise_mag=None, x_min=0., x_max=1.)
+avgLoss, perturb, x_adv = sl_pgd(model, loss, imgTens, labelTens, alpha, eps, norm, n_restarts, n_steps, batch_size,
+                               outIdx=None, targeted=targeted, rand_init=rand_init, noise_mag=None, x_min=0., x_max=1.)
 
 ###################
 # Get Predictions #

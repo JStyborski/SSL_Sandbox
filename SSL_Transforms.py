@@ -96,10 +96,25 @@ def MoCoV2Transform(mode, cropSize):
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
+    elif mode == 'finetuneGN':
+        t = transforms.Compose([
+            transforms.RandomResizedCrop(cropSize),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            GaussianNoise(0.25),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
     elif mode == 'test':
         t = transforms.Compose([
             transforms.Resize(int(round(1.1428 * cropSize))),  # CIFAR: 1.1428 * 28 = 32, IN: 1.1428 * 224 = 256
             transforms.CenterCrop(cropSize),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+    elif mode == 'bleh':
+        t = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
@@ -118,6 +133,15 @@ class GaussianBlur(object):
         x = x.filter(ImageFilter.GaussianBlur(radius=sigma))
         return x
 
+class GaussianNoise(object):
+
+    def __init__(self, sigma=0.5):
+        self.sigma = sigma
+
+    def __call__(self, x):
+        x = x + torch.randn_like(x) * self.sigma ** 2
+        return x
+
 
 class TwoTimesTransform:
     """Take two random crops of one image as the query and key."""
@@ -129,3 +153,15 @@ class TwoTimesTransform:
         t1 = self.base_transform(x)
         t2 = self.base_transform(x)
         return [t1, t2]
+
+
+class NTimesTransform:
+    """Take n random crops of one image as the query and key."""
+
+    def __init__(self, n, base_transform):
+        self.n = n
+        self.base_transform = base_transform
+
+    def __call__(self, x):
+        tList = [self.base_transform(x) for _ in range(self.n)]
+        return tList

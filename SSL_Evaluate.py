@@ -194,7 +194,7 @@ def adv_attack(loader, model, lossfn):
 
     # Attack batch of images with FGSM or PGD and calculate accuracy
     avgAdvLoss, perturbTens, advTens = FGSM_PGD.sl_pgd(model, lossfn, augTens, truthTens, advAlpha, advEps, np.inf,
-                                                    atkBatchSize, advRestarts, advSteps, 0, False, randInit)
+                                                    advRestarts, advSteps, atkBatchSize, 0, False, randInit)
     advAcc = torch.sum(torch.argmax(model(advTens)[0].detach(), dim=1) == truthTens).cpu().numpy() / advTens.size(0)
 
     return advAcc

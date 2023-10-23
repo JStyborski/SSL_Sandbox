@@ -39,8 +39,8 @@ parser.add_argument('--randSeed', default=None, type=int, help='RNG initial set 
 # Dataset parameters
 parser.add_argument('--trainRoot', default='', type=str, help='Training dataset root directory')
 parser.add_argument('--trainLabels', default=True, type=lambda x:bool(strtobool(x)), help='Boolean if the training data is in label folders')
-parser.add_argument('--cropSize', default=224, type=int, help='Crop size to use for input images')
 parser.add_argument('--ptPrefix', default='', type=str, help='Prefix to add to pretrained file name')
+parser.add_argument('--cropSize', default=224, type=int, help='Crop size to use for input images')
 
 # Training parameters
 parser.add_argument('--nEpochs', default=100, type=int, help='Number of epochs to run')
@@ -84,15 +84,24 @@ parser.add_argument('--mecEd2', default=0.06, type=float, help='Related to the c
 parser.add_argument('--mecTaylorTerms', default=2, type=int, help='Number of Taylor expansion terms to include in matrix logarithm approximation')
 
 # Adversarial training parameters
-parser.add_argument('--advPT', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply adversarial training')
+parser.add_argument('--useAdv1', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply adversarial training to augmentation 1 batch')
+parser.add_argument('--useAdv2', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply adversarial training to augmentation 2 batch')
+parser.add_argument('--keepStd', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to train with the adversarial plus original images - increases batch size')
+parser.add_argument('--advBatchSize', default=512, type=int, help='Batch size to use for adversarial training loader')
+parser.add_argument('--advAlpha', default=1/255, type=float, help='PGD step size')
+parser.add_argument('--advEps', default=8/255, type=float, help='PGD attack radius limit, measured in specified norm')
+parser.add_argument('--advNorm', default=float('inf'), type=float, help='Norm type for measuring perturbation radius')
+parser.add_argument('--advSteps', default=10, type=int, help='Number of PGD steps to take')
+parser.add_argument('--advNoise', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to use random initialization')
+parser.add_argument('--advRestarts', default=1, type=int, help='Number of PGD restarts to search for best attack')
 
 ##################
 # Misc Functions #
 ##################
 
-def save_chkpt(prefix, epoch, encArch, cifarMod, encDim, prjHidDim, prjOutDim, prdDim, prdAlpha, prdEps, prdBeta, momEncBeta, model, optimizer):
+def save_chkpt(prefix, epoch, encArch, cifarMod, encDim, prjHidDim, prjOutDim, prdDim, prdAlpha, prdEps, prdBeta, momEncBeta, applySG, model, optimizer):
     torch.save({'epoch': epoch, 'encArch': encArch, 'cifarMod': cifarMod, 'encDim': encDim, 'prjHidDim': prjHidDim, 'prjOutDim': prjOutDim,
-                'prdDim': prdDim, 'prdAlpha': prdAlpha, 'prdEps': prdEps, 'prdBeta': prdBeta, 'momEncBeta': momEncBeta,
+                'prdDim': prdDim, 'prdAlpha': prdAlpha, 'prdEps': prdEps, 'prdBeta': prdBeta, 'momEncBeta': momEncBeta, 'applySG': applySG,
                 'stateDict': model.state_dict(), 'optimStateDict': optimizer.state_dict()},
                'Trained_Models/{}_pt_{:04d}.pth.tar'.format(prefix, epoch))
 
@@ -110,18 +119,16 @@ def main():
     args = parser.parse_args()
 
     # Overwrite defaults (hack for Pycharm)
-    args.trainRoot = r'D:\CIFAR-10\Poisoned\TAP_untargeted'
-    args.ptPrefix = 'SimCLR-TAP'
+    args.trainRoot = r'D:\CIFAR-10\train'
+    args.ptPrefix = 'Clean'
     args.cropSize = 28
     args.nEpochs = 1000
-    args.weightDecay = 1e-4
-    args.initLR = 0.25
+    args.weightDecay = 1e-5
+    args.initLR = 0.5
     args.cifarMod = True
-    args.nceBeta = 1.0
-    args.nceTau = 0.5
-    args.prdDim = 0
-    args.applySG = False
-    args.advPT = False
+    args.applySG = True
+    args.useAdv1 = True
+    args.useAdv2 = False
 
     if args.randSeed is not None:
         random.seed(args.randSeed)
@@ -135,7 +142,7 @@ def main():
     if not args.multiprocDistrib:
         warnings.warn('You have disabled DDP - the model will train on 1 GPU without data parallelism')
 
-    if args.multiprocDistrib and args.nceBeta > 0.0:
+    if args.multiprocDistrib and args.winceBeta > 0.0:
         warnings.warn('InfoNCE loss is not suited for DDP training on multiple GPU')
         # DDP splits data across multiple GPU and later averages the gradients across GPU
         # This behavior gives an incorrect estimate of InfoNCE loss due to its reliance on negative pair similarities
@@ -186,7 +193,7 @@ def main_worker(gpu, args):
 
     print('- Defining dataset and loader')
     if args.trainLabels:
-        trainDataset = datasets.ImageFolder(args.trainRoot, SSL_Transforms.TwoTimesTransform(SSL_Transforms.MoCoV2Transform('pretrain', args.cropSize)))
+        trainDataset = datasets.ImageFolder(args.trainRoot, SSL_Transforms.NTimesTransform(2, SSL_Transforms.MoCoV2Transform('pretrain', args.cropSize)))
     else:
         trainDataset = SSL_Dataset.no_label_dataset(args.trainRoot, SSL_Transforms.TwoTimesTransform(SSL_Transforms.MoCoV2Transform('pretrain', args.cropSize)))
     if args.multiprocDistrib:
@@ -262,7 +269,7 @@ def main_worker(gpu, args):
     if args.runProbes:
         probes = SSL_Probes.Pretrain_Probes()
     save_chkpt(args.ptPrefix, 0, args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
-              args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, model, optimizer)
+              args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, model, optimizer)
     timeStart = time.time()
 
     print('- Beginning training')
@@ -295,12 +302,18 @@ def main_worker(gpu, args):
             aug2Tens = batch[0][1].cuda(args.gpu, non_blocking=True)
 
             # Untested: It can run and results seem okay but I haven't checked it carefully
-            if args.advPT:
-                _, _, _, adv1Tens, adv2Tens = FGSM_PGD.ssl_pgd(model, lossFn, aug1Tens, aug2Tens, 1/255, 8/255, float('inf'),
-                                                               5, 10, outIdx1=0, outIdx2=3, useAdv1=True, useAdv2=False,
-                                                               targeted=False, rand_init=True)
-                aug1Tens = adv1Tens.detach()
-                aug2Tens = adv2Tens.detach()
+            if args.useAdv1 or args.useAdv2:
+                _, _, _, adv1Tens, adv2Tens = FGSM_PGD.ssl_pgd(model, lossFn, aug1Tens, aug2Tens, args.advAlpha, args.advEps,
+                                                               args.advNorm, args.advRestarts, args.advSteps, args.advBatchSize,
+                                                               outIdx1=0, outIdx2=3, useAdv1=args.useAdv1, useAdv2=args.useAdv2,
+                                                               targeted=False, rand_init=args.advNoise)
+
+                if args.keepStd:
+                    aug1Tens = torch.cat((aug1Tens, adv1Tens.detach()), dim=0).cuda(args.gpu, non_blocking=True)
+                    aug2Tens = torch.cat((aug2Tens, adv2Tens.detach()), dim=0).cuda(args.gpu, non_blocking=True)
+                else:
+                    aug1Tens = adv1Tens.detach()
+                    aug2Tens = adv2Tens.detach()
 
             # Run each augmented batch through encoder, projector, predictor, and momentum encoder/projector
             p1, z1, r1, mz1 = model(aug1Tens)
@@ -356,13 +369,13 @@ def main_worker(gpu, args):
                                  (mz2 / torch.linalg.vector_norm(mz2, dim=-1, keepdim=True)).detach())
 
         # Checkpoint model
-        if epoch == 1 or epoch == 5 or (epoch <= 100 and epoch % 10 == 0) or (epoch <= 200 and epoch % 20 == 0) or (epoch > 200 and epoch % 50 == 0):
+        if epoch in [1, 10] or (epoch <= 200 and epoch % 20 == 0) or (epoch > 200 and epoch % 50 == 0):
             save_chkpt(args.ptPrefix, epoch, args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim,
-                       args.prdDim, args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, model, optimizer)
+                       args.prdDim, args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, model, optimizer)
 
     # Postprocessing and outputs
 
-    if args.runProbes:
+    if args.runProbes and (args.gpu == 0 or not args.multiprocDistrib):
 
         #probes.plot_probes()
 
