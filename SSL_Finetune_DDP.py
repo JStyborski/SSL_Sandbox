@@ -36,6 +36,7 @@ parser.add_argument('--workers', default=4, type=int, help='Total number of data
 parser.add_argument('--randSeed', default=None, type=int, help='RNG initial set point')
 
 # Dataset parameters
+parser.add_argument('--ptFile', default='', type=str, help='Single pretrained model to train - if empty, finetunes all in ptDir')
 parser.add_argument('--ptDir', default='', type=str, help='Folder containing pretrained models')
 parser.add_argument('--trainRoot', default='', type=str, help='Training dataset root directory')
 parser.add_argument('--ftPrefix', default='', type=str, help='Prefix to add to finetuned file name')
@@ -55,7 +56,7 @@ parser.add_argument('--decaySteps', default=[60, 75, 90], type=list, help='Steps
 parser.add_argument('--decayFactor', default=0.2, type=float, help='Factor by which to multiply LR at step down')
 
 # Adversarial training parameters
-parser.add_argument('--advFT', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply adversarial training')
+parser.add_argument('--useAdv', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply adversarial training')
 parser.add_argument('--keepStd', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to train with the adversarial plus original images - increases batch size')
 parser.add_argument('--advBatchSize', default=512, type=int, help='Batch size to use for adversarial training loader')
 parser.add_argument('--advAlpha', default=1/255, type=float, help='PGD step size')
@@ -78,19 +79,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Overwrite defaults
-    args.ptDir = 'Trained_Models'
-    args.ftType = 'ft'
-    args.initLR = 0.1
-    args.decayLR = 'cosdn'
-    #args.trainRoot = 'D:/CIFAR-10/Poisoned/TAP_untargeted'
-    args.trainRoot = 'D:/CIFAR-10/train'
-    args.ftPrefix = 'Clean'
-    args.cropSize = 28
-    args.nAugs = 1
-    args.advFT = True
-    args.keepStd = True
-
     if args.randSeed is not None:
         random.seed(args.randSeed)
         torch.manual_seed(args.randSeed)
@@ -102,12 +90,16 @@ def main():
     if not args.multiprocDistrib:
         warnings.warn('You have disabled DDP - the model will train on 1 GPU without data parallelism')
 
+    if args.ptFile == '':
+        # List of pretrained models as any model with _pt_ in the name
+        args.ptList = sorted([args.ptDir + '/' + stateFile for stateFile in os.listdir(args.ptDir)
+                         if ('_pt_' in stateFile and '_lp_' not in stateFile and '_ft_' not in stateFile)])
+    else:
+        # Single file
+        args.ptList = [args.ptDir + '/' + args.ptFile]
+
     # Infer learning rate
     args.initLR = args.initLR * args.batchSize / 256
-
-    # Get list of pretrained models
-    args.ptList = sorted([args.ptDir + '/' + stateFile for stateFile in os.listdir(args.ptDir)
-                     if ('_pt_' in stateFile and '_lp_' not in stateFile and '_ft_' not in stateFile)])
 
     # Launch multiple (or single) distributed processes for main_worker function - will automatically assign GPUs
     if args.multiprocDistrib:
@@ -267,8 +259,8 @@ def main_worker(gpu, args):
                     augTens = aug.cuda(args.gpu, non_blocking=True)
 
                     # Calculate (untargeted) adversarial samples from inputs and use for training
-                    if args.advFT:
-                        _, _, advTens = FGSM_PGD.sl_pgd(model, nn.CrossEntropyLoss(reduction='none'), augTens, truthTens,
+                    if args.useAdv:
+                        _, advTens = FGSM_PGD.sl_pgd(model, nn.CrossEntropyLoss(reduction='none'), augTens, truthTens,
                                                         args.advAlpha, args.advEps, args.advNorm, args.advRestarts, args.advSteps,
                                                         args.advBatchSize, outIdx=0, targeted=False, rand_init=args.advNoise)
                         if args.keepStd:

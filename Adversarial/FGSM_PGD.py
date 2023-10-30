@@ -106,16 +106,16 @@ def sl_pgd(model, lossFn, X, Y, alpha, eps, norm, n_restarts, n_steps, batch_siz
     :param alpha: [float] [1] - Input variation parameter, see https://arxiv.org/abs/1412.6572
     :param eps: [float] [1] - Norm constraint bound for adversarial example
     :param norm: [float] [1] - Order of the norm (mimics NumPy)
-    :param batch_size: [int] [1] - Number of samples to calculate loss for at once
     :param n_restarts: [int] [1] - Number of PGD restarts
     :param n_steps: [int] [1] - Number of PGD steps
+    :param batch_size: [int] [1] - Number of samples to calculate loss for at once
     :param outIdx: [int] [1] - Index corresponding to the desired output (set as None for only 1 output)
     :param targeted: [Bool] [1] - Whether to direct the adversarial attack towards a specific label/target
     :param rand_init: [Bool] [1] - Whether to start adversarial search with random offset
     :param noise_mag: [float] [1] - Maximum random initial perturbation magnitude
     :param x_min: [float] [1] - Minimum value of x_adv (useful for ensuring images are useable)
     :param x_max: [float] [1] - Maximum value of x_adv (useful for ensuring images are useable)
-    :return: a tensor for the adversarial example
+    :return: Adversarial tensor
     """
 
     if norm not in [np.inf, 1, 2]:
@@ -204,38 +204,35 @@ def sl_pgd(model, lossFn, X, Y, alpha, eps, norm, n_restarts, n_steps, batch_siz
     # Concatenate the adversarial output tensor
     advTens = torch.concatenate(adv_samples_list, dim=0).to(X.device)
 
-    return total_loss / len(X), advTens - X, advTens
+    return total_loss / len(X), advTens
 
 
-def ssl_pgd(model, lossFn, X1, X2, alpha, eps, norm, n_restarts, n_steps, batch_size, outIdx1=None, outIdx2=None,
-            useAdv1=True, useAdv2=False, targeted=False, rand_init=True, noise_mag=None, x_min=None, x_max=None):
+def ssl_pgd(model, lossFn, inpList, useAdvList, alpha, eps, norm, n_restarts, n_steps, batch_size,
+            targeted=False, rand_init=True, noise_mag=None, x_min=None, x_max=None):
     """
     Implementation the Kurakin 2016 Basic Iterative Method (rand_init=False) or Madry 2017 PGD method (rand_init=True)
     This function assumes that model and x are on same device
     Equivalent to FGSM if eps is high such that no limit is applied, rand_init = False, and n_restarts = perturb_steps = 1
     :param model: [function] [1] - Callable function that takes an input tensor and returns the model logits
-    :param lossFn: [function] [1] - Callable function for calculating loss values per input - the loss function
-        should be initialized already with reduction='none' so that each input gets a loss
-        - CrossEntropyLoss - Typical loss used for FGSM/PGD. The main issue is when logit magnitudes are large (e.g., 500)
-        such that the softmax(logits) exponential is dominated by 1 term and the output distribution is a one-hot.
-        If the one-hot is correct, then CE loss is 0, then the gradient is 0, then eta is 0, the x_adv = x.
-        Typical remedies are to L2 normalize logits or use NLLLoss (below)
-        - NLLLoss - Not typically used for FGSM/PGD. This essentially returns the negative of the correct logit as loss.
-    :param X1: [Pytorch tensor] [m x n] - Nominal input tensor
-    :param X2: [tensor] [m x n] - Tensor with truth labels
+    :param lossFn: [function] [1] - Callable function for calculating SSL loss values from an output list.
+            Contrary to sl_pgd, this function expects a single loss value output (i.e., reduction is 'mean' or 'sum')
+            This is because sl_pgd samples are evaluated independently against a truth label, whereas ssl_pgd samples
+            are evaluated against each other (e.g., InfoNCE). It could be incorrect to update only some samples.
+            Also, tracking individual losses across multiple views is difficult.
+    :param inpList: [list] [n] - List of augmentation tensors, each a view used in the SSL input
+    :param useAdvList: [list] [n] - List of booleans for each view, whether to apply adversarial
     :param alpha: [float] [1] - Input variation parameter, see https://arxiv.org/abs/1412.6572
     :param eps: [float] [1] - Norm constraint bound for adversarial example
     :param norm: [float] [1] - Order of the norm (mimics NumPy)
-    :param batch_size: [int] [1] - Number of samples to calculate loss for at once
     :param n_restarts: [int] [1] - Number of PGD restarts
     :param n_steps: [int] [1] - Number of PGD steps
-    :param outIdx: [int] [1] - Index corresponding to the desired output (set as None for only 1 output)
+    :param batch_size: [int] [1] - Number of samples to calculate loss for at once
     :param targeted: [Bool] [1] - Whether to direct the adversarial attack towards a specific label/target
     :param rand_init: [Bool] [1] - Whether to start adversarial search with random offset
     :param noise_mag: [float] [1] - Maximum random initial perturbation magnitude
     :param x_min: [float] [1] - Minimum value of x_adv (useful for ensuring images are useable)
     :param x_max: [float] [1] - Maximum value of x_adv (useful for ensuring images are useable)
-    :return: a tensor for the adversarial example
+    :return: Adversarial tensors
     """
 
     if norm not in [np.inf, 1, 2]:
@@ -244,103 +241,93 @@ def ssl_pgd(model, lossFn, X1, X2, alpha, eps, norm, n_restarts, n_steps, batch_
         print('Warning: FGM may not be a good inner loop step, because norm=1 FGM only changes 1 pixel at a time')
 
     # Make a dataset and loader using the X and Y tensor inputs
-    dataset = torch.utils.data.TensorDataset(X1, X2)
+    dataset = torch.utils.data.TensorDataset(*inpList)
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
     # Ensure model doesn't update batchnorm or anything
     model.eval()
 
-    # Initialize the running variables, total loss and list of adversarial samples (for concatenation later)
-    total_loss = 0.
-    adv1_samples_list = []
-    adv2_samples_list = []
+    for iter1, augList in enumerate(loader):
 
-    for x1, x2 in loader:
+        for iter2 in range(n_restarts):
 
-        for i in range(n_restarts):
+            advList = []
 
-            # Apply random initial perturbation to input (or don't)
-            if rand_init and useAdv1:
-                if noise_mag is None:
-                    noise_mag = eps
-                noise = torch.zeros_like(x1).uniform_(-noise_mag, noise_mag)
-                noise = clip_tens(noise, list(range(1, len(noise.size()))), norm, eps)
-                x1_adv = x1 + noise.to(x1.device)
-            else:
-                x1_adv = x1
+            # Loop through the augmentation tensors to initialize adversarial tensors
+            for i, aug in enumerate(augList):
 
-            if rand_init and useAdv2:
-                if noise_mag is None:
-                    noise_mag = eps
-                noise = torch.zeros_like(x2).uniform_(-noise_mag, noise_mag)
-                noise = clip_tens(noise, list(range(1, len(noise.size()))), norm, eps)
-                x2_adv = x2 + noise.to(x2.device)
-            else:
-                x2_adv = x2
+                # Apply random initial perturbation to input (or don't)
+                if rand_init and useAdvList[i]:
+                    if noise_mag is None:
+                        noise_mag = eps
+                    noise = torch.zeros_like(aug).uniform_(-noise_mag, noise_mag)
+                    noise = clip_tens(noise, list(range(1, len(noise.size()))), norm, eps)
+                    adv = aug + noise.to(aug.device)
+                else:
+                    adv = aug
 
-            # Ensure x_adv elements within appropriate bounds
-            if x_min is not None or x_max is not None:
-                x1_adv = torch.clamp(x1_adv, x_min, x_max)
-                x2_adv = torch.clamp(x2_adv, x_min, x_max)
+                # Ensure adv elements within appropriate bounds
+                if x_min is not None or x_max is not None:
+                    adv = torch.clamp(adv, x_min, x_max)
+
+                advList.append(adv)
+
 
             for _ in range(n_steps):
 
-                # Reset the gradients of the adversarial input and model
-                x1_adv = x1_adv.detach()
-                x2_adv = x2_adv.detach()
-                if useAdv1:
-                    x1_adv.requires_grad = True
-                if useAdv2:
-                    x2_adv.requires_grad = True
                 model.zero_grad()
 
-                # Calculate outputs and loss
-                out1 = model(x1_adv) if outIdx1 is None else model(x1_adv)[outIdx1]
-                out2 = model(x2_adv) if outIdx2 is None else model(x2_adv)[outIdx2]
-                lossVal = lossFn.forward(out1, out2)
+                outList = []
+
+                # Loop through the adversarial tensors
+                for i in range(len(advList)):
+
+                    # Reset the gradients of the adversarial input
+                    advList[i] = advList[i].detach()
+                    if useAdvList[i]:
+                        advList[i].requires_grad = True
+
+                    # Calculate outputs and append
+                    outList.append(model(advList[i]))
+
+                # Calculate loss
+                lossVal = lossFn.forward(outList)
                 if targeted:
                     lossVal = -lossVal
                 lossVal.backward()
 
-                # Update adversarial inputs
-                if useAdv1:
-                    eta = optimize_linear(x1_adv.grad, list(range(1, len(x1_adv.grad.size()))), norm)
-                    x1_adv = x1_adv.data + alpha * eta
-                    eta = clip_tens(x1_adv - x1, list(range(1, len(x1.size()))), norm, eps)
-                    x1_adv = x1 + eta
-                if useAdv2:
-                    eta = optimize_linear(x2_adv.grad, list(range(1, len(x2_adv.grad.size()))), norm)
-                    x2_adv = x2_adv.data + alpha * eta
-                    eta = clip_tens(x2_adv - x2, list(range(1, len(x2.size()))), norm, eps)
-                    x2_adv = x2 + eta
+                # Loop through adversarial tensors
+                for i in range(len(advList)):
 
-                # Ensure x_adv elements within appropriate bounds
-                if x_min is not None or x_max is not None:
-                    x1_adv = torch.clamp(x1_adv, x_min, x_max)
-                    x2_adv = torch.clamp(x2_adv, x_min, x_max)
+                    # Update adversarial tensors based on backpropagated gradients
+                    if useAdvList[i]:
+                        eta = optimize_linear(advList[i].grad, list(range(1, len(advList[i].grad.size()))), norm)
+                        advList[i] = advList[i].data + alpha * eta
+                        eta = clip_tens(advList[i] - augList[i], list(range(1, len(augList[i].size()))), norm, eps)
+                        advList[i] = augList[i] + eta
+
+                    # Ensure adv elements within appropriate bounds
+                    if x_min is not None or x_max is not None:
+                        advList[i] = torch.clamp(advList[i], x_min, x_max)
 
             # Compare the best loss so far to loss for this restart and take the better adversarial sample
-            if i == 0:
-                best_loss = lossVal.detach()
-                x1_adv_final = x1_adv.detach()
-                x2_adv_final = x2_adv.detach()
+            if iter2 == 0:
+                bestLoss = lossVal.detach()
+                finalAdvList = [adv.detach() for adv in advList]
             else:
-                if targeted:
-                    betterLossMask = lossVal.detach() < best_loss
-                else:
-                    betterLossMask = lossVal.detach() > best_loss
-                best_loss[betterLossMask] = lossVal[betterLossMask].detach()
-                x1_adv_final[betterLossMask, :] = x1_adv[betterLossMask, :].detach()
-                x2_adv_final[betterLossMask, :] = x2_adv[betterLossMask, :].detach()
+                # If new loss is better, update best loss and finalAdvList
+                if (targeted and lossVal.detach() < bestLoss) or (not targeted and lossVal.detach() > bestLoss):
+                    bestLoss = lossVal.detach()
+                    finalAdvList = [adv.detach() for adv in advList]
 
         # Calculate loss for each sample and sum batch and append the adversarial tensor to list for concat later
-        total_loss += torch.sum(best_loss).item()
-        adv1_samples_list.append(x1_adv_final.detach().cpu())
-        adv2_samples_list.append(x2_adv_final.detach().cpu())
+        if iter1 == 0:
+            totalLoss = bestLoss
+            cumulAdvList = finalAdvList
+        else:
+            totalLoss += bestLoss
+            for i in range(len(cumulAdvList)):
+                cumulAdvList[i] = torch.cat((cumulAdvList[i], finalAdvList[i]), dim=0)
 
-    # Calculate the average loss across all samples and concatenate the adversarial output tensor
-    adv1Tens = torch.concatenate(adv1_samples_list, dim=0).to(X1.device)
-    adv2Tens = torch.concatenate(adv2_samples_list, dim=0).to(X2.device)
-
-    return lossVal / len(X1), adv1Tens - X1, adv2Tens - X2, adv1Tens, adv2Tens
+    return totalLoss / len(inpList[0]), cumulAdvList
 

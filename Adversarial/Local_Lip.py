@@ -127,22 +127,11 @@ def maximize_local_lip(model, X, alpha=0.003, eps=0.01, top_norm=1, bot_norm=np.
 
                 # Get outputs of the model for x_adv
                 modelOut = model(x_adv)
-
-                # Hack to include all outputs in backprop graph, yet nullify the unused components
-                # DDP which requires all model components be used in fwd/back, otherwise they are marked for "reduction"
-                # https://github.com/pytorch/pytorch/issues/43690
-                null = 0
-                if outIdx is None:
-                    xadvOut = modelOut
-                else:
-                    xadvOut = modelOut[outIdx]
-                    for idx, output in enumerate(modelOut):
-                        if idx == outIdx: continue
-                        null += 0 * torch.sum(output)
+                xadvOut = modelOut if outIdx is None else modelOut[outIdx]
 
                 # Calculate the local lipschitz constant using x and x_adv, then backpropagate to get gradients
                 lolip = lll.forward(x, x_adv, xOut, xadvOut)
-                sumlolip = torch.sum(lolip) + null
+                sumlolip = torch.sum(lolip)
                 sumlolip.backward()
 
                 # Calculate the new adversarial example given the new step - gradient ascent towards higher Lipschitz
@@ -159,8 +148,8 @@ def maximize_local_lip(model, X, alpha=0.003, eps=0.01, top_norm=1, bot_norm=np.
 
             # Compare max lolip so far for each sample with lolip for this restart and take max
             if i == 0:
-                x_adv_final = x_adv.detach()
                 max_lolip = lolip.detach()
+                x_adv_final = x_adv.detach()
             else:
                 betterLolipMask = lolip > max_lolip
                 max_lolip[betterLolipMask] = lolip[betterLolipMask].detach()
@@ -170,8 +159,7 @@ def maximize_local_lip(model, X, alpha=0.003, eps=0.01, top_norm=1, bot_norm=np.
         total_lolip += torch.sum(max_lolip).item()
         adv_samples_list.append(x_adv_final.detach().cpu())
 
-    # Calculate the average lolip across all samples and concatenate the adversarial output tensor
-    avgLolip = total_lolip / len(X)
+    # Concatenate the adversarial output tensor
     advTens = torch.concatenate(adv_samples_list, dim=0).to(X.device)
 
-    return avgLolip, advTens
+    return total_lolip / len(X), advTens

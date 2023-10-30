@@ -13,7 +13,7 @@ import torchvision.datasets as datasets
 
 import SSL_Dataset
 import SSL_Transforms
-import SSL_Model
+import SSL_Model_PTFT
 import SSL_Probes
 from Adversarial import FGSM_PGD
 
@@ -98,11 +98,11 @@ parser.add_argument('--advRestarts', default=1, type=int, help='Number of PGD re
 # Misc Functions #
 ##################
 
-def save_chkpt(prefix, epoch, encArch, cifarMod, encDim, prjHidDim, prjOutDim, prdDim, prdAlpha, prdEps, prdBeta, momEncBeta, applySG, model, optimizer):
+def save_chkpt(prefix, epoch, encArch, cifarMod, encDim, prjHidDim, prjOutDim, prdDim, prdAlpha, prdEps, prdBeta, momEncBeta, applySG, model, optimizer1, optimizer2):
     torch.save({'epoch': epoch, 'encArch': encArch, 'cifarMod': cifarMod, 'encDim': encDim, 'prjHidDim': prjHidDim, 'prjOutDim': prjOutDim,
                 'prdDim': prdDim, 'prdAlpha': prdAlpha, 'prdEps': prdEps, 'prdBeta': prdBeta, 'momEncBeta': momEncBeta, 'applySG': applySG,
-                'stateDict': model.state_dict(), 'optimStateDict': optimizer.state_dict()},
-               'Trained_Models/{}_pt_{:04d}.pth.tar'.format(prefix, epoch))
+                'stateDict': model.state_dict(), 'optim1StateDict': optimizer1.state_dict(), 'optim2StateDict': optimizer2.state_dict()},
+               'Trained_Models/{}_ptft_{:04d}.pth.tar'.format(prefix, epoch))
 
 def gather_tensors(outLen, tens):
     outTens = torch.zeros(outLen, tens.size(1), device=tens.get_device())
@@ -116,6 +116,17 @@ def gather_tensors(outLen, tens):
 def main():
 
     args = parser.parse_args()
+
+    # Overwrite defaults (hack for Pycharm)
+    args.trainRoot = r'D:\CIFAR-10\train'
+    args.ptPrefix = 'Clean'
+    args.cropSize = 28
+    args.nEpochs = 1000
+    args.weightDecay = 1e-5
+    args.initLR = 0.5
+    args.cifarMod = True
+    args.applySG = True
+    args.symmetrizeLoss = True
 
     if args.randSeed is not None:
         random.seed(args.randSeed)
@@ -194,9 +205,11 @@ def main_worker(gpu, args):
     trainDataLoader = torch.utils.data.DataLoader(trainDataset, batch_size=args.batchSize, shuffle=(trainSampler is None),
                                                   num_workers=args.workers, pin_memory=True, sampler=trainSampler, drop_last=True)
 
+    args.nClasses = len(trainDataset.classes)
+
     print('- Instantiating new model with {} backbone'.format(args.encArch))
-    model = SSL_Model.Base_Model(args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
-                                 args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG)
+    model = SSL_Model_PTFT.Base_Model(args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
+                                 args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, args.nClasses)
 
     print('- Setting up model on single/multiple devices')
     if args.multiprocDistrib:
@@ -219,29 +232,33 @@ def main_worker(gpu, args):
 
     print('- Instantiating loss function')
     if args.lossType == 'wince':
-        lossFn = SSL_Model.Weighted_InfoNCE_Loss(args.symmetrizeLoss, args.winceBeta, args.winceTau)
-    elif args.lossType == 'bt':
-        lossFn = SSL_Model.Barlow_Twins_Loss(args.symmetrizeLoss, args.btLam, args.btLossType)
-    elif args.lossType == 'vicreg':
-        lossFn = SSL_Model.VICReg_Loss(args.symmetrizeLoss, args.vicAlpha, args.vicBeta, args.vicGamma)
+        lossFn1 = SSL_Model_PTFT.Weighted_InfoNCE_Loss(args.symmetrizeLoss, args.winceBeta, args.winceTau)
+    #elif args.lossType == 'bt':
+    #    lossFn = SSL_Model.Barlow_Twins_Loss(args.symmetrizeLoss, args.btLam, args.btLossType)
+    #elif args.lossType == 'vicreg':
+    #    lossFn = SSL_Model.VICReg_Loss(args.symmetrizeLoss, args.vicAlpha, args.vicBeta, args.vicGamma)
     #elif args.lossType == 'mec':
     #    lossFn = SSL_Model.MEC_Loss(args.symmetrizeLoss, args.mecEd2, args.mecTaylorTerms)
+    lossFn2 = SSL_Model_PTFT.MultiAug_CrossEnt_Loss(args.symmetrizeLoss)
 
     # Instantiate custom optimizer that skips momentum encoder and applies decay
     print('- Instantiating optimizer')
     if args.multiprocDistrib:
-        optimParams = [{'params': model.module.encoder.parameters(), 'decayLR': args.decayEncLR},
+        optim1Params = [{'params': model.module.encoder.parameters(), 'decayLR': args.decayEncLR},
                        {'params': model.module.projector.parameters(), 'decayLR': args.decayEncLR},
                        {'params': model.module.predictor.parameters(), 'decayLR': args.decayPrdLR}]
+        optim2Params = [{'params': model.module.lincls.parameters(), 'decayLR': args.decayEncLR}]
     else:
-        optimParams = [{'params': model.encoder.parameters(), 'decayLR': args.decayEncLR},
+        optim1Params = [{'params': model.encoder.parameters(), 'decayLR': args.decayEncLR},
                        {'params': model.projector.parameters(), 'decayLR': args.decayEncLR},
                        {'params': model.predictor.parameters(), 'decayLR': args.decayPrdLR}]
-    optimizer = torch.optim.SGD(params=optimParams, lr=args.initLR, momentum=args.momentum, weight_decay=args.weightDecay)
+        optim2Params = [{'params': model.lincls.parameters(), 'decayLR': args.decayEncLR}]
+    optimizer1 = torch.optim.SGD(params=optim1Params, lr=args.initLR, momentum=args.momentum, weight_decay=args.weightDecay)
+    optimizer2 = torch.optim.SGD(params=optim2Params, lr=args.initLR, momentum=args.momentum, weight_decay=0)
     if args.useLARS:
         print("- Using LARS optimizer.")
         from Apex_LARC import LARC
-        optimizer = LARC(optimizer=optimizer, trust_coefficient=0.001, clip=False)
+        optimizer1 = LARC(optimizer=optimizer1, trust_coefficient=0.001, clip=False)
 
     # Optionally resume model/optimizer from checkpoint
     if args.loadChkPt is not None:
@@ -250,13 +267,14 @@ def main_worker(gpu, args):
         chkPt = torch.load(args.loadChkPt, map_location='cuda:{}'.format(args.gpu))
         args.startEpoch = chkPt['epoch'] + 1
         model.load_state_dict(chkPt['stateDict'], strict=False)
-        optimizer.load_state_dict(chkPt['optimStateDict'])
+        optimizer1.load_state_dict(chkPt['optim1StateDict'])
+        optimizer2.load_state_dict(chkPt['optim2StateDict'])
 
     # Initialize probes for training metrics, checkpoint initial model, and start timer
     if args.runProbes:
         probes = SSL_Probes.Pretrain_Probes()
     save_chkpt(args.ptPrefix, 0, args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
-              args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, model, optimizer)
+              args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, model, optimizer1, optimizer2)
     timeStart = time.time()
 
     print('- Beginning training')
@@ -269,56 +287,84 @@ def main_worker(gpu, args):
         # If using LR warmup, the warmup LR is linear, applies to all layers, and takes priority over decay
         if epoch <= args.lrWarmupEp:
             curLR = epoch / args.lrWarmupEp * args.initLR
-            for param_group in optimizer.param_groups:
+            for param_group in optimizer1.param_groups:
+                param_group['lr'] = curLR
+            for param_group in optimizer2.param_groups:
                 param_group['lr'] = curLR
 
         # If desired, adjust learning rate for the current epoch using cosine annealing
         if (args.decayEncLR or args.decayPrdLR) and epoch >= args.lrWarmupEp:
             curLR = args.initLR * 0.5 * (1. + math.cos(math.pi * (epoch - 1) / args.nEpochs))
-            for param_group in optimizer.param_groups:
+            for param_group in optimizer1.param_groups:
+                if param_group['decayLR']:
+                    param_group['lr'] = curLR
+            for param_group in optimizer2.param_groups:
                 if param_group['decayLR']:
                     param_group['lr'] = curLR
 
         # Set model to train and reset sum of losses for each epoch
         model.train()
-        sumLoss = 0.0
+        sumLoss1 = 0.0
+        sumLoss2 = 0.0
+        runNCorrect = 0
+        runNTotal = 0
 
         for batchI, batch in enumerate(trainDataLoader):
 
-            augList = []
-            for augTens in batch[0]:
-                augList.append(augTens.cuda(args.gpu, non_blocking=True))
-
             if any(args.useAdvList):
 
-                _, advTensList = FGSM_PGD.ssl_pgd(model, lossFn, augList, args.useAdvList, args.advAlpha, args.advEps,
-                                                  args.advNorm, args.advRestarts, args.advSteps, args.advBatchSize,
-                                                  targeted=False, rand_init=args.advNoise)
+                print('Adversarial Training does not work yet')
 
-                for i in range(len(advTensList)):
-                    if args.keepStd:
-                        augList[i] = torch.cat((augList[i], advTensList[i].detach()), dim=0).cuda(args.gpu, non_blocking=True)
-                    else:
-                        augList[i] = advTensList[i].detach()
+                #_, _, advTensList = FGSM_PGD.ssl_pgd(model, lossFn, batch[0], args.advAlpha, args.advEps, args.advNorm,
+                #                                     args.advRestarts, args.advSteps, args.advBatchSize, args.useAdvList,
+                #                                     targeted=False, rand_init=args.advNoise)
+                #
+                # Untested: It can run and results seem okay but I haven't checked it carefully
+                # if args.useAdv1 or args.useAdv2:
+                #    _, _, _, adv1Tens, adv2Tens = FGSM_PGD.ssl_pgd(model, lossFn, aug1Tens, aug2Tens, args.advAlpha, args.advEps,
+                #                                                   args.advNorm, args.advRestarts, args.advSteps, args.advBatchSize,
+                #                                                   useAdv1=args.useAdv1, useAdv2=args.useAdv2,
+                #                                                   targeted=False, rand_init=args.advNoise)
+                #
+                #    if args.keepStd:
+                #        aug1Tens = torch.cat((aug1Tens, adv1Tens.detach()), dim=0).cuda(args.gpu, non_blocking=True)
+                #        aug2Tens = torch.cat((aug2Tens, adv2Tens.detach()), dim=0).cuda(args.gpu, non_blocking=True)
+                #    else:
+                #        aug1Tens = adv1Tens.detach()
+                #        aug2Tens = adv2Tens.detach()
+
+            else:
+                augList = batch[0]
+
+            truthTens = batch[1].cuda(args.gpu, non_blocking=True)
 
             # Reset outputs list
-            outList = []
+            sslOutList = []
+            slOutList = []
 
             # Loop through each of the augs and create a list of results
-            for augTens in augList:
+            for aug in augList:
 
                 # Get input tensor, push through model, and append to output list
-                p, z, r, mz = model(augTens)
-                outList.append([p, z, r, mz])
+                augTens = aug.cuda(args.gpu, non_blocking=True)
+                p, z, r, mz, c = model(augTens)
+                sslOutList.append([p, z, r, mz])
+                slOutList.append(c)
 
             # Calculate loss
-            lossVal = lossFn.forward(outList)
+            lossVal1 = lossFn1.forward(sslOutList)
+            lossVal2, nCorrect, nTotal = lossFn2.forward(slOutList, truthTens)
 
             # Backpropagate
             model.zero_grad()  # momenc and optPrd not included in optimizer, but they don't use grads - this should be redundant
-            optimizer.zero_grad()
-            lossVal.backward()
-            optimizer.step()
+            optimizer1.zero_grad()
+            lossVal1.backward(retain_graph=True)
+            optimizer1.step()
+
+            # Backpropagate for lincls
+            optimizer2.zero_grad()
+            lossVal2.backward()
+            optimizer2.step()
 
             # Update momentum encoder
             if args.momEncBeta > 0.0:
@@ -328,10 +374,13 @@ def main_worker(gpu, args):
                     model.update_momentum_network()
 
             # Keep running sum of loss
-            sumLoss += lossVal.detach()
+            sumLoss1 += lossVal1.detach()
+            sumLoss2 += lossVal2.detach()
+            runNCorrect += nCorrect
+            runNTotal += nTotal
 
-        print('Epoch: {} / {} | Elapsed Time: {:0.2f} | Avg Loss: {:0.4f}'
-              .format(epoch, args.nEpochs, time.time() - timeStart, sumLoss / (batchI + 1)))
+        print('Epoch: {} / {} | Elapsed Time: {:0.2f} | Avg SSL Loss: {:0.4f} | Avg SL Loss: {:0.4f} | SL Train Acc: {:0.4f}'
+              .format(epoch, args.nEpochs, time.time() - timeStart, sumLoss1 / (batchI + 1), sumLoss2 / (batchI + 1), runNCorrect / runNTotal))
 
         # Track record metrics while running
         if args.runProbes:
@@ -342,22 +391,22 @@ def main_worker(gpu, args):
             # If data was split out for DDP, then combine output tensors for analysis
             if args.multiprocDistrib and args.nProcs > 1:
                 outLen = args.batchSize * args.nProcs
-                p1 = gather_tensors(outLen, outList[0][0].detach())
-                z1 = gather_tensors(outLen, outList[0][1].detach())
-                r1 = gather_tensors(outLen, outList[0][2].detach())
-                r2 = gather_tensors(outLen, outList[1][2].detach())
-                mz2 = gather_tensors(outLen, outList[1][3].detach())
+                p1 = gather_tensors(outLen, sslOutList[0][0].detach())
+                z1 = gather_tensors(outLen, sslOutList[0][1].detach())
+                r1 = gather_tensors(outLen, sslOutList[0][2].detach())
+                r2 = gather_tensors(outLen, sslOutList[1][2].detach())
+                mz2 = gather_tensors(outLen, sslOutList[1][3].detach())
             else:
-                p1 = outList[0][0].detach()
-                z1 = outList[0][1].detach()
-                r1 = outList[0][2].detach()
-                r2 = outList[1][2].detach()
-                mz2 = outList[1][3].detach()
+                p1 = sslOutList[0][0].detach()
+                z1 = sslOutList[0][1].detach()
+                r1 = sslOutList[0][2].detach()
+                r2 = sslOutList[1][2].detach()
+                mz2 = sslOutList[1][3].detach()
 
             # Note that p1, z1, and mz2 are L2 normd, as SimSiam, BYOL, InfoNCE, and MEC use L2 normalized encodings
             # This is taken care of in loss functions, but I have to do it explicitly here
             # This probe update is inaccurate for softmax-normalized encs (DINO, SwAV) or batch normalized encs (Barlow Twins)
-            probes.update_probes(epoch, lossVal.detach(),
+            probes.update_probes(epoch, lossVal1.detach(),
                                  (p1 / torch.linalg.vector_norm(p1, dim=-1, keepdim=True)).detach(),
                                  (z1 / torch.linalg.vector_norm(z1, dim=-1, keepdim=True)).detach(),
                                  r1.detach(), r2.detach(),
@@ -366,7 +415,7 @@ def main_worker(gpu, args):
         # Checkpoint model
         if epoch in [1, 10] or (epoch <= 200 and epoch % 20 == 0) or (epoch > 200 and epoch % 50 == 0):
             save_chkpt(args.ptPrefix, epoch, args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim,
-                       args.prdDim, args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, model, optimizer)
+                       args.prdDim, args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, model, optimizer1, optimizer2)
 
     # Postprocessing and outputs
 

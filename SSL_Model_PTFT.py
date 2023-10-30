@@ -17,7 +17,7 @@ def reset_model_weights(layer):
 
 class Base_Model(nn.Module):
     def __init__(self, encArch=None, cifarMod=False, encDim=512, prjHidDim=2048, prjOutDim=2048, prdDim=512,
-                 prdAlpha=None, prdEps=0.3, prdBeta=0.5, momEncBeta=0, applySG=True):
+                 prdAlpha=None, prdEps=0.3, prdBeta=0.5, momEncBeta=0, applySG=True, nClasses=None):
         super(Base_Model, self).__init__()
         self.prdAlpha = prdAlpha
         self.prdEps = prdEps
@@ -25,6 +25,7 @@ class Base_Model(nn.Module):
         self.momZCor = None  # Initialize momentum correlation matrix as None (overwritten later)
         self.momEncBeta = momEncBeta
         self.applySG = applySG
+        self.nClasses = nClasses
 
         self.encoder = models.__dict__[encArch](num_classes=encDim, zero_init_residual=True)
         self.encoder.fc = nn.Identity(encDim)
@@ -65,6 +66,9 @@ class Base_Model(nn.Module):
             self.momentum_projector.apply(fn=reset_model_weights)
             for param in self.momentum_projector.parameters(): param.requires_grad = False
 
+        if self.nClasses is not None:
+            self.lincls = nn.Linear(encDim, self.nClasses)
+
     def forward(self, x):
         """
         Propagate input through encoder and decoder
@@ -95,7 +99,13 @@ class Base_Model(nn.Module):
         if self.applySG:
             mz = mz.detach()
 
-        return p, z, r, mz
+        # Determine linear classifier output
+        if self.nClasses is not None:
+            c = self.lincls(r)
+        else:
+            c = None
+
+        return p, z, r, mz, c
 
     def calculate_optimal_predictor(self, z):
         """
@@ -158,10 +168,13 @@ class Weighted_InfoNCE_Loss:
         # Loop through each view
         for i in range(len(outList)):
 
+            # Loss corresponding to the ith view
+            ithLoss = 0
+
             # Calculate positive pairwise similarity loss for the ith view
             for j in range(len(outList)):
                 if i == j: continue
-                ithLoss = -1.0 * cosine_similarity(outList[i][0], outList[j][-1], reduction='mean')
+                ithLoss += -1.0 * cosine_similarity(outList[i][0], outList[j][-1], reduction='mean')
 
             # Calculate negative similarity loss (InfoNCE denominator) - This formulation is best seen in the BYOL paper
             if self.winceBeta > 0.0:
@@ -195,110 +208,98 @@ class Weighted_InfoNCE_Loss:
         return totalLoss
 
 
-class Barlow_Twins_Loss:
-    # Implements Barlow Twins loss as in https://arxiv.org/abs/2103.03230 and https://arxiv.org/abs/2205.11508
-    # Also includes an optional loss modification as in https://arxiv.org/abs/2104.13712
+class MultiAug_CrossEnt_Loss:
 
-    def __init__(self, symmetrizeLoss=False, btLam=0.005, btLossType='bt'):
-        """
-        :param symmetrizeLoss: [Bool] - Boolean to symmetrize loss
-        :param btLam: [float] - Coefficient for off-diagonal loss terms - Tsai 2021 paper on BT + HSIC recommends 1/d
-        :param btLossType: ['bt' or 'hsic'] - Method of calculating loss, particularly differs for off-diagonal terms
-        """
+    def __init__(self, symmetrizeLoss):
         self.symmetrizeLoss = symmetrizeLoss
-        self.btLam = btLam # Note that the Tsai 2021 paper on HSIC + BT recommends setting btLam to 1/d
-        self.btLossType = btLossType
-        assert self.btLossType in ['bt', 'hsic']
+        self.crossent = nn.CrossEntropyLoss()
 
-    def forward(self, outList):
+    def forward(self, predList, truthTens):
 
-        # Barlow Twins loss is based on cross-correlation between 2 views only
-        # If you want to use more views, there are ways to hack BT loss by inserting other views into the 2 views
-        # See 2022 Balestriero paper for an example
-        assert len(outList) == 2
-
-        # Track loss across all views
         totalLoss = 0
+        nCorrect = 0
+        nTotal = 0
 
-        # Loop through each view
-        for i in range(len(outList)):
+        for i in range(len(predList)):
 
-            # If i=1, then j=0, and vice-versa
-            j = 1 - i
+            ce = self.crossent(predList[i], truthTens)
 
-            # Batch normalize each batch
-            # Note that the Balestriero 2023 implementation of BT doesn't center the batches
-            outList[i][0] = (outList[i][0] - outList[i][0].mean(dim=0, keepdim=True)) / outList[i][0].std(dim=0, unbiased=True, keepdim=True)
-            outList[j][-1] = (outList[j][-1] - outList[j][-1].mean(dim=0, keepdim=True)) / outList[j][-1].std(dim=0, unbiased=True, keepdim=True)
+            totalLoss += ce
+            nCorrect += torch.sum(torch.argmax(predList[i].detach(), dim=1) == truthTens).cpu().numpy()
+            nTotal += len(truthTens)
 
-            # Calculate cross-correlation
-            # Note that the Balestriero 2023 implementation of BT doesn't use the 1/N factor
-            crossCorr = 1.0 / outList[i][0].size(0) * torch.tensordot(outList[i][0], outList[j][-1], dims=([0], [0]))
-
-            # Calculate Barlow Twins cross-correlation loss
-            if self.btLossType == 'bt':
-                totalLoss += (torch.diag(crossCorr) - 1).square().sum() + 2 * self.btLam * torch.triu(crossCorr, 1).square().sum()
-            else:
-                totalLoss += (torch.diag(crossCorr) - 1).square().sum() + 2 * self.btLam * (torch.triu(crossCorr, 1) + 1).square().sum()
-
-            # If not symmetrizing loss, break after calculating loss for first component
             if not self.symmetrizeLoss:
                 break
 
         totalLoss /= (i + 1)
 
-        return totalLoss
+        return totalLoss, nCorrect, nTotal
+
+
+class Barlow_Twins_Loss:
+    # Implements Barlow Twins loss as in https://arxiv.org/abs/2103.03230 and https://arxiv.org/abs/2205.11508
+    # Also includes an optional loss modification as in https://arxiv.org/abs/2104.13712
+
+    def __init__(self, btLam=0.005, btLossType='bt'):
+        """
+        :param btLam: [float] - Coefficient for off-diagonal loss terms - Tsai 2021 paper on BT + HSIC recommends 1/d
+        :param btLossType: ['bt' or 'hsic'] - Method of calculating loss, particularly differs for off-diagonal terms
+        """
+        self.btLam = btLam # Note that the Tsai 2021 paper on HSIC + BT recommends setting btLam to 1/d
+        self.btLossType = btLossType
+        assert self.btLossType in ['bt', 'hsic']
+
+    def forward(self, batch1Prd, batch2Prj):
+
+        # Batch normalize each batch
+        # Note that the Balestriero 2023 implementation of BT doesn't center the batches
+        normBatch1 = (batch1Prd - batch1Prd.mean(dim=0, keepdim=True)) / batch1Prd.std(dim=0, unbiased=True, keepdim=True)
+        normBatch2 = (batch2Prj - batch2Prj.mean(dim=0, keepdim=True)) / batch2Prj.std(dim=0, unbiased=True, keepdim=True)
+
+        # Calculate cross-correlation
+        # Note that the Balestriero 2023 implementation of BT doesn't use the 1/N factor
+        crossCorr = 1.0 / batch1Prd.size(0) * torch.tensordot(normBatch1, normBatch2, dims=([0], [0]))
+
+        # Calculate Barlow Twins cross-correlation loss
+        if self.btLossType == 'bt':
+            lossVal = (torch.diag(crossCorr) - 1).square().sum() + 2 * self.btLam * torch.triu(crossCorr, 1).square().sum()
+        else:
+            lossVal = (torch.diag(crossCorr) - 1).square().sum() + 2 * self.btLam * (torch.triu(crossCorr, 1) + 1).square().sum()
+
+        return lossVal
 
 
 class VICReg_Loss:
     # Implements VICReg loss from https://arxiv.org/abs/2105.04906 and https://arxiv.org/abs/2205.11508
 
-    def __init__(self, symmetrizeLoss, vicAlpha=25.0, vicBeta=25.0, vicGamma=1.0):
+    def __init__(self, vicAlpha=25.0, vicBeta=25.0, vicGamma=1.0):
         """
-        :param symmetrizeLoss: [Bool] - Boolean to symmetrize loss
         :param vicAlpha: [float] - Coefficient on variance loss
         :param vicBeta: [float] - Coefficient on invariance loss
         :param vicGamma: [float] - Coefficient on covariance loss
         """
-        self.symmetrizeLoss = symmetrizeLoss
         self.vicAlpha = vicAlpha
         self.vicBeta = vicBeta
         self.vicGamma = vicGamma
 
-    def forward(self, outList):
+    def forward(self, batch1Prd, batch2Prj):
 
-        # Track loss across all views
-        totalLoss = 0
+        # Calculate covariance and covariance losses of batches 1 and 2
+        b1Cov = torch.cov(batch1Prd.T)
+        b2Cov = torch.cov(batch2Prj.T)
+        cov1Loss = 2 / batch1Prd.size(1) * torch.triu(b1Cov, 1).square().sum()
+        cov2Loss = 2 / batch2Prj.size(1) * torch.triu(b2Cov, 1).square().sum()
 
-        # Loop through each view
-        for i in range(len(outList)):
+        # Get variances from covariance matrices and calculate variance losses
+        var1Loss = 1 / batch1Prd.size(1) * (1 - torch.diag(b1Cov).clamp(1e-6).sqrt()).clamp(0).sum()
+        var2Loss = 1 / batch2Prj.size(1) * (1 - torch.diag(b2Cov).clamp(1e-6).sqrt()).clamp(0).sum()
 
-            # Calculate ith view covariance and then the covariance and variance losses for it
-            covI = torch.cov(outList[i][0])
-            ithLoss = self.vicGamma * 2 / outList[i][0].size(1) * torch.triu(covI, 1).square().sum()
-            ithLoss += self.vicAlpha * 1 / outList[i][0].size(1) * (1 - torch.diag(covI).clamp(1e-6).sqrt()).clamp(0).sum()
+        # Calculate L2 distance loss between encodings
+        invLoss = 1 / batch1Prd.size(0) * torch.linalg.vector_norm(batch1Prd - batch2Prj, ord=2, dim=1).square().sum()
 
-            for j in range(len(outList)):
-                if i == j: continue
+        lossVal = self.vicAlpha * (var1Loss + var2Loss) + self.vicBeta * invLoss + self.vicGamma * (cov1Loss + cov2Loss)
 
-                # Calculate jth view covariance and then the covariance and variance losses for it
-                covJ = torch.cov(outList[j][-1])
-                ithLoss += self.vicGamma * 2 / outList[j][-1].size(1) * torch.triu(covJ, 1).square().sum()
-                ithLoss += self.vicAlpha * 1 / outList[j][-1].size(1) * (1 - torch.diag(covJ).clamp(1e-6).sqrt()).clamp(0).sum()
-
-                # Invariance loss between ith and jth views
-                ithLoss += self.vicBeta * 1 / outList[i][0].size(0) \
-                           * torch.linalg.vector_norm(outList[i][0] - outList[j][-1], ord=2, dim=1).square().sum()
-
-            totalLoss += ithLoss
-
-            # If not symmetrizing loss, break after calculating loss for first component
-            if not self.symmetrizeLoss:
-                break
-
-        totalLoss /= (i + 1)
-
-        return totalLoss
+        return lossVal
 
 
 class MEC_Loss:
@@ -437,3 +438,5 @@ class MCE:
         lossVal = unifL + self.alignLam * alignL
 
         return lossVal
+
+

@@ -5,7 +5,7 @@ from torch import nn
 import torchvision.datasets as datasets
 
 import SSL_Transforms
-import SSL_Model
+import SSL_Model_PTFT
 from Adversarial import FGSM_PGD, Local_Lip
 import SSL_Probes
 
@@ -16,15 +16,14 @@ import SSL_Probes
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Load data
-trainRoot = r'D:/CIFAR-10/Poisoned/TAP_untargeted'
+trainRoot = r'D:/CIFAR-10/Poisoned/EM_S'
 testRoot = r'D:/CIFAR-10/test'
 
 # Find pretrained models
-dirName = 'Trained_Models'
+dirName = 'Saved_Models/CIFAR10/SimSiam_PTFT/UE'
 fileList = os.listdir(dirName)
 ptList = sorted([dirName + '/' + stateFile for stateFile in fileList
-                 if ('_pt_' in stateFile and '_lp_' not in stateFile and '_ft_' not in stateFile)])
-#args.ptList = [args.ptDir + '/my_nice_pretrain_file.pth.tar']
+                 if ('_ptft_' in stateFile and '_lp_' not in stateFile and '_ft_' not in stateFile)])
 ftType = 'lp' # 'lp' or 'ft'
 
 # Data parameters
@@ -89,7 +88,7 @@ def make_rep_bank(loader, batchSize, model, encDim, nBankBatches):
         truthTens = batch[1].to(device)
 
         # Get input encodings and write encodings + labels to bank
-        _, _, r, _ = model(augTens)
+        _, _, r, _, _ = model(augTens)
         repBank[batchI * batchSize:(batchI + 1) * batchSize, :] = r.detach()
         labelBank[batchI * batchSize:(batchI + 1) * batchSize] = truthTens
 
@@ -127,7 +126,7 @@ def knn_vote(loader, knnBank, labelBank, k, knnTestBatches):
         truthTens = batch[1].to(device).detach().cpu()
 
         # Run augmented data through model, get output before linear classifier
-        _, _, r, _ = model(augTens)
+        _, _, r, _, _ = model(augTens)
         r = r.detach().cpu()
 
         batchSize = r.size(0)
@@ -169,10 +168,10 @@ def train_test_acc(loader, model, nBatches):
         truthTens = batch[1].to(device)
 
         # Run augmented data through SimSiam with linear classifier
-        p, _, _, _ = model(augTens)
+        _, _, _, _, c = model(augTens)
 
         # Keep running sum of loss
-        nCorrect += torch.sum(torch.argmax(p.detach(), dim=1) == truthTens).cpu().numpy()
+        nCorrect += torch.sum(torch.argmax(c.detach(), dim=1) == truthTens).cpu().numpy()
         nTotal += batch[0].size(0)
 
         if batchI + 1 >= nBatches:
@@ -194,8 +193,8 @@ def adv_attack(loader, model, lossfn):
     model.zero_grad()
 
     # Attack batch of images with FGSM or PGD and calculate accuracy
-    avgAdvLoss, advTens = FGSM_PGD.sl_pgd(model, lossfn, augTens, truthTens, advAlpha, advEps, np.inf, advRestarts,
-                                          advSteps, atkBatchSize, 0, False, randInit)
+    avgAdvLoss, perturbTens, advTens = FGSM_PGD.sl_pgd(model, lossfn, augTens, truthTens, advAlpha, advEps, np.inf,
+                                                    advRestarts, advSteps, atkBatchSize, -1, False, randInit)
     advAcc = torch.sum(torch.argmax(model(advTens)[0].detach(), dim=1) == truthTens).cpu().numpy() / advTens.size(0)
 
     return advAcc
@@ -221,13 +220,13 @@ for stateFile in ptList:
             del ptStateDict['stateDict'][key]
 
     # Create model and load model weights
-    model = SSL_Model.Base_Model(ptStateDict['encArch'], ptStateDict['cifarMod'], ptStateDict['encDim'],
-                                 ptStateDict['prjHidDim'], ptStateDict['prjOutDim'], ptStateDict['prdDim'], None, 0.3, 0.5, 0.0, True)
+    model = SSL_Model_PTFT.Base_Model(ptStateDict['encArch'], ptStateDict['cifarMod'], ptStateDict['encDim'],
+                                 ptStateDict['prjHidDim'], ptStateDict['prjOutDim'], ptStateDict['prdDim'], None, 0.3, 0.5, 0.0, True, nClasses)
     model.load_state_dict(ptStateDict['stateDict'], strict=False)
 
-    # Replace the projector with identity and the predictor with linear classifier
+    # Replace the projector and predictor with identity to save space/compute (they are unused)
     model.projector = nn.Identity(ptStateDict['encDim'])
-    model.predictor = nn.Linear(ptStateDict['encDim'], nClasses)
+    model.predictor = nn.Identity(ptStateDict['encDim'])
 
     # Freeze model parameters (mostly to reduce computation - grads for Lolip and AdvAtk can still propagate through)
     for param in model.parameters(): param.requires_grad = False
@@ -252,46 +251,18 @@ for stateFile in ptList:
     knnAcc = knn_vote(knnTestLoader, knnBank, knnLabelBank, k, knnTestBatches)
     print('KNN Accuracy: {:0.4f}'.format(knnAcc))
 
-    # Declare finetune file name and check if it already exists
-    ptPrefix = (stateFile[:-8] + '_').split('/')[1]
-    ftPrefix = '_' + ftType + '_'
-    ftFiles = sorted([dirName + '/' + file for file in fileList if (ptPrefix in file and ftPrefix in file)])
-    for ftFile in ftFiles:
+    # Clean dataset accuracy
+    clnTrainAcc = train_test_acc(linTrainLoader, model, trainAccBatches)
+    print('Train Accuracy: {:0.4f}'.format(clnTrainAcc))
+    clnTestAcc = train_test_acc(linTestLoader, model, testAccBatches)
+    print('Test Accuracy: {:0.4f}'.format(clnTestAcc))
 
-        if evalFinetune and len(ftFiles) > 0:
+    # Evaluate adversarial accuracy
+    advAcc = adv_attack(atkLoader, model, nn.NLLLoss(reduction='none'))
+    print('Adv Accuracy: {:0.4f}'.format(advAcc))
 
-            print('Evaluating ' + ftFile)
-
-            # Load finetune file
-            ftStateDict = torch.load(ftFile, map_location='cuda:{}'.format(0))
-
-            # If a stateDict key has "module" in (from running parallel), create a new dictionary with the right names
-            for key in list(ftStateDict.keys()):
-                if key.startswith('module.'):
-                    ftStateDict[key[7:]] = ftStateDict[key]
-                    del ftStateDict[key]
-
-            # Load finetune parameters and freeze all
-            model.load_state_dict(ftStateDict, strict=True)
-            for param in model.parameters(): param.requires_grad = False
-
-            # Clean dataset accuracy
-            clnTrainAcc = train_test_acc(linTrainLoader, model, trainAccBatches)
-            print('Train Accuracy: {:0.4f}'.format(clnTrainAcc))
-            clnTestAcc = train_test_acc(linTestLoader, model, testAccBatches)
-            print('Test Accuracy: {:0.4f}'.format(clnTestAcc))
-
-            # Evaluate adversarial accuracy
-            advAcc = adv_attack(atkLoader, model, nn.NLLLoss(reduction='none'))
-            print('Adv Accuracy: {:0.4f}'.format(advAcc))
-
-        else:
-            clnTrainAcc = None
-            clnTestAcc = None
-            advAcc = None
-
-        # Update probes
-        probes.update_probes(ptStateDict['epoch'], repBank, avgRepLolip, knnAcc, clnTrainAcc, clnTestAcc, advAcc)
+    # Update probes
+    probes.update_probes(ptStateDict['epoch'], repBank, avgRepLolip, knnAcc, clnTrainAcc, clnTestAcc, advAcc)
 
 
 ##################

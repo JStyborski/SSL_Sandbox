@@ -88,6 +88,43 @@ def MoCoV2Transform(mode, cropSize):
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
+    elif mode == 'pretrainGN':
+        t = transforms.Compose([
+            transforms.RandomResizedCrop(cropSize, scale=(0.2, 1.)),
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            GaussianNoise(0.25),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+    elif mode == 'pretrainRF':
+        t = transforms.Compose([
+            transforms.RandomResizedCrop(cropSize, scale=(0.2, 1.)),
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            RandomFilter(mode='random', nFilters=1, maxMag=1, blurMag=0.3, kernelSize=3),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+    elif mode == 'pretrainRFGN':
+        t = transforms.Compose([
+            transforms.RandomResizedCrop(cropSize, scale=(0.2, 1.)),
+            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            RandomFilter(mode='random', nFilters=1, maxMag=1, blurMag=0.3, kernelSize=3),
+            GaussianNoise(0.25),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
     elif mode == 'finetune':
         t = transforms.Compose([
             transforms.RandomResizedCrop(cropSize),
@@ -140,6 +177,27 @@ class GaussianNoise(object):
 
     def __call__(self, x):
         x = x + torch.randn_like(x) * self.sigma ** 2
+        return x
+
+
+class RandomFilter(object):
+
+    def __init__(self, mode='random', nFilters=1, maxMag=1, blurMag=0.06, kernelSize=9):
+        self.mode = mode
+        self.nFilters = nFilters
+        self.maxMag = maxMag
+        self.blurMag = blurMag
+        self.kernelSize = kernelSize
+
+    def __call__(self, x):
+
+        for i in range(self.nFilters):
+            filt = np.random.uniform(low=0, high=self.blurMag, size=(1, 1, self.kernelSize, self.kernelSize))
+            if self.maxMag is not None:
+                filt[0, 0, np.random.randint(filt.shape[2]), np.random.randint(filt.shape[3])] = self.maxMag
+            filt = np.repeat(filt, 3, axis=0)
+            x = torch.nn.functional.conv2d(x, torch.from_numpy(filt).float(), stride=1, groups=3, padding='same')
+
         return x
 
 
