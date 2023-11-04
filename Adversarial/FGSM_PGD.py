@@ -278,6 +278,7 @@ def ssl_pgd(model, lossFn, inpList, useAdvList, alpha, eps, norm, n_restarts, n_
                 model.zero_grad()
 
                 outList = []
+                recList = []
 
                 # Loop through the adversarial tensors
                 for i in range(len(advList)):
@@ -288,7 +289,9 @@ def ssl_pgd(model, lossFn, inpList, useAdvList, alpha, eps, norm, n_restarts, n_
                         advList[i].requires_grad = True
 
                     # Calculate outputs and append
-                    outList.append(model(advList[i]))
+                    p, z, r, mz, xd = model(advList[i])
+                    outList.append([p, z, r, mz])
+                    recList.append(xd)
 
                 # Calculate loss
                 lossVal = lossFn.forward(outList)

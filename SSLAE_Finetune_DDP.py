@@ -12,8 +12,8 @@ from torch import nn
 import torch.backends.cudnn as cudnn
 import torchvision.datasets as datasets
 
-import SSL_Transforms
-import SSL_Model
+import SSLAE_Model
+import Utils.Custom_Transforms as CT
 from Adversarial import FGSM_PGD
 
 # CUDNN automatically searches for the best algorithm for processing a given model/optimizer/dataset
@@ -133,17 +133,16 @@ def main_worker(gpu, args):
     # For multiprocessing distributed training, rank needs to be the global rank among all the processes
     if args.multiprocDistrib:
         args.procRank = args.nodeRank * args.nProcPerNode + args.gpu
-        torch.distributed.init_process_group(backend=args.distBackend, init_method=args.distURL,
-                                             world_size=args.nProcs, rank=args.procRank)
+        torch.distributed.init_process_group(backend=args.distBackend, init_method=args.distURL, world_size=args.nProcs, rank=args.procRank)
         torch.distributed.barrier()
 
     print('Defining dataset and loader')
-    #trainDataset = datasets.ImageFolder(args.trainRoot, SSL_Transforms.MoCoV2Transform('finetune', args.cropSize))
-    trainDataset = datasets.ImageFolder(args.trainRoot, SSL_Transforms.NTimesTransform(args.nAugs, SSL_Transforms.MoCoV2Transform('finetune', args.cropSize)))
+    trainDataset = datasets.ImageFolder(args.trainRoot, CT.NTimesTransform(args.nAugs, CT.t_finetune(args.cropSize)))
     if args.multiprocDistrib:
         trainSampler = torch.utils.data.distributed.DistributedSampler(trainDataset)
         # When using single GPU per process and per DDP, need to divide batch size and workers based on nGPUs
         args.batchSize = int(args.batchSize / args.nProcs)
+        args.advBatchSize = int(args.advBatchSize / args.nProcs)
         args.workers = int(args.workers / args.nProcs)
     else:
         trainSampler = None
@@ -166,15 +165,15 @@ def main_worker(gpu, args):
         # Load saved state
         stateDict = torch.load(stateFile, map_location='cuda:{}'.format(args.gpu))
 
+        print('- Instantiating new model with {} backbone'.format(stateDict['encArch']))
+        model = SSLAE_Model.Base_Model(stateDict['encArch'], stateDict['cifarMod'], stateDict['encDim'],
+                                     stateDict['prjHidDim'], stateDict['prjOutDim'], stateDict['prdDim'], None, 0.3, 0.5, 0.0, True, None)
+
         # If a stateDict key has "module" in (from running parallel), create a new dictionary with the right names
         for key in list(stateDict['stateDict'].keys()):
             if key.startswith('module.'):
                 stateDict['stateDict'][key[7:]] = stateDict['stateDict'][key]
                 del stateDict['stateDict'][key]
-
-        print('- Instantiating new model with {} backbone'.format(stateDict['encArch']))
-        model = SSL_Model.Base_Model(stateDict['encArch'], stateDict['cifarMod'], stateDict['encDim'],
-                                     stateDict['prjHidDim'], stateDict['prjOutDim'], stateDict['prdDim'], None, 0.3, 0.5, 0.0, True)
 
         print('- Loading model weights from {}'.format(stateFile))
         model.load_state_dict(stateDict['stateDict'], strict=False)
@@ -217,7 +216,7 @@ def main_worker(gpu, args):
             optimizer = torch.optim.SGD(params=model.parameters(), lr=args.initLR, momentum=args.momentum, weight_decay=args.weightDecay)
         if args.useLARS:
             print("- Using LARS optimizer.")
-            from Apex_LARC import LARC
+            from Utils.Apex_LARC import LARC
             optimizer = LARC(optimizer=optimizer, trust_coefficient=0.001, clip=False)
 
         # Start timer
@@ -269,7 +268,7 @@ def main_worker(gpu, args):
                             augTens = advTens.detach()
 
                     # Run augmented data through SimSiam with linear classifier
-                    p, _, _, _ = model(augTens)
+                    p, _, _, _, _ = model(augTens)
                     pList.append(p)
 
                 p = torch.concatenate(pList, dim=0).cuda(args.gpu, non_blocking=True)

@@ -3,6 +3,7 @@ import builtins
 from distutils.util import strtobool
 import math
 import numpy as np
+import os
 import random
 import time
 import warnings
@@ -11,10 +12,11 @@ import torch
 import torch.backends.cudnn as cudnn
 import torchvision.datasets as datasets
 
-import SSL_Dataset
-import SSL_Transforms
-import SSL_Model
-import SSL_Probes
+import SSLAE_Model
+import SSLAE_Loss
+import Utils.Custom_Dataset as CD
+import Utils.Custom_Transforms as CT
+import Utils.Custom_Probes as CP
 from Adversarial import FGSM_PGD
 
 # CUDNN automatically searches for the best algorithm for processing a given model/optimizer/dataset
@@ -69,10 +71,11 @@ parser.add_argument('--prdEps', default=0.3, type=float, help='Optimal predictor
 parser.add_argument('--prdBeta', default=0.5, type=float, help='Optimal predictor correlation update momentum')
 parser.add_argument('--momEncBeta', default=0.0, type=float, help='Momentum encoder update momentum - set as 0.0 for no momentum encoder')
 parser.add_argument('--applySG', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to apply stop-gradient to one branch')
+parser.add_argument('--decArch', default=None, type=str, help='Decoder network type (ResNets only)')
 
 # Loss parameters
 parser.add_argument('--symmetrizeLoss', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to apply loss function equally on both augmentation batches')
-parser.add_argument('--lossType', default='wince', type=str, help='Loss type to apply')
+parser.add_argument('--sslLossType', default='wince', type=str, help='SSL loss type to apply')
 parser.add_argument('--winceBeta', default=0.0, type=float, help='Contrastive term coefficient in InfoNCE loss - set as 0.0 for no contrastive term')
 parser.add_argument('--winceTau', default=0.1, type=float, help='Contrastive loss temperature factor')
 parser.add_argument('--btLam', default=0.005, type=float, help='Coefficient to apply to off-diagonal terms of BT loss')
@@ -82,6 +85,8 @@ parser.add_argument('--vicBeta', default=25.0, type=float, help='Coefficient on 
 parser.add_argument('--vicGamma', default=1.0, type=float, help='Coefficient on covariance loss term')
 parser.add_argument('--mecEd2', default=0.06, type=float, help='Related to the coefficient applied to correlation matrix')
 parser.add_argument('--mecTaylorTerms', default=2, type=int, help='Number of Taylor expansion terms to include in matrix logarithm approximation')
+parser.add_argument('--aeLossType', default='mse', type=str, help='AE loss type to apply')
+parser.add_argument('--aeLossFactor', default=0.25, type=float, help='Factor to apply to AE MSE loss -> (1 - factor) applied to SSL loss')
 
 # Adversarial training parameters
 parser.add_argument('--useAdvList', default=[False, False], type=list, help='List of Booleans to apply adversarial training for each view')
@@ -98,10 +103,10 @@ parser.add_argument('--advRestarts', default=1, type=int, help='Number of PGD re
 # Misc Functions #
 ##################
 
-def save_chkpt(prefix, epoch, encArch, cifarMod, encDim, prjHidDim, prjOutDim, prdDim, prdAlpha, prdEps, prdBeta, momEncBeta, applySG, model, optimizer):
+def save_chkpt(prefix, epoch, encArch, cifarMod, encDim, prjHidDim, prjOutDim, prdDim, prdAlpha, prdEps, prdBeta, momEncBeta, applySG, decArch, model, optimizer):
     torch.save({'epoch': epoch, 'encArch': encArch, 'cifarMod': cifarMod, 'encDim': encDim, 'prjHidDim': prjHidDim, 'prjOutDim': prjOutDim,
                 'prdDim': prdDim, 'prdAlpha': prdAlpha, 'prdEps': prdEps, 'prdBeta': prdBeta, 'momEncBeta': momEncBeta, 'applySG': applySG,
-                'stateDict': model.state_dict(), 'optimStateDict': optimizer.state_dict()},
+                'decArch': decArch, 'stateDict': model.state_dict(), 'optimStateDict': optimizer.state_dict()},
                'Trained_Models/{}_pt_{:04d}.pth.tar'.format(prefix, epoch))
 
 def gather_tensors(outLen, tens):
@@ -116,6 +121,13 @@ def gather_tensors(outLen, tens):
 def main():
 
     args = parser.parse_args()
+
+    #args.trainRoot = r'D:/ImageNet-100/Poisoned/TAP_100/train'
+    #args.ptPrefix = 'TAP'
+    #args.nEpochs = 200
+    #args.batchSize = 32
+    #args.initLR = 0.5
+    #args.decArch = args.encArch
 
     if args.randSeed is not None:
         random.seed(args.randSeed)
@@ -138,7 +150,14 @@ def main():
         # SimCLR disallows multi-GPU training entirely, only allowing parallelizing on TPUs
         # CLIP accepts that the batch size is split across GPUs and doesn't call their loss "InfoNCE"
 
-    assert args.lossType in ['wince', 'bt', 'vicreg', 'mce']
+    if args.decArch is not None and any(args.useAdvList):
+        warnings.warn('Adversarial SSL does not incorporate AE architecture - may get bugs or strange results')
+
+    assert args.sslLossType in ['wince', 'bt', 'vicreg', 'mec']
+    assert args.aeLossType in ['mse']
+
+    if not os.path.exists('Trained_Models'):
+        os.mkdir('Trained_Models')
 
     # Infer learning rate
     args.initLR = args.initLR * args.batchSize / 256
@@ -174,19 +193,22 @@ def main_worker(gpu, args):
     # For multiprocessing distributed training, rank needs to be the global rank among all the processes
     if args.multiprocDistrib:
         args.procRank = args.nodeRank * args.nProcPerNode + args.gpu
-        torch.distributed.init_process_group(backend=args.distBackend, init_method=args.distURL,
-                                             world_size=args.nProcs, rank=args.procRank)
+        torch.distributed.init_process_group(backend=args.distBackend, init_method=args.distURL, world_size=args.nProcs, rank=args.procRank)
         torch.distributed.barrier()
 
     print('- Defining dataset and loader')
     if args.trainLabels:
-        trainDataset = datasets.ImageFolder(args.trainRoot, SSL_Transforms.NTimesTransform(args.nAugs, SSL_Transforms.MoCoV2Transform('pretrain', args.cropSize)))
+        if args.decArch is None:
+            trainDataset = datasets.ImageFolder(args.trainRoot, CT.NTimesTransform(args.nAugs, CT.t_pretrain(args.cropSize)))
+        else:
+            trainDataset = datasets.ImageFolder(args.trainRoot, CT.NTimesTransform_2Parts(args.nAugs, CT.t_randcrop(args.cropSize), CT.t_toPIL_pretrain()))
     else:
-        trainDataset = SSL_Dataset.no_label_dataset(args.trainRoot, SSL_Transforms.NTimesTransform(args.nAugs, SSL_Transforms.MoCoV2Transform('pretrain', args.cropSize)))
+        trainDataset = CD.no_label_dataset(args.trainRoot, CT.NTimesTransform(args.nAugs, CT.t_pretrain(args.cropSize)))
     if args.multiprocDistrib:
         trainSampler = torch.utils.data.distributed.DistributedSampler(trainDataset)
         # When using single GPU per process and per DDP, need to divide batch size and workers based on nGPUs
         args.batchSize = int(args.batchSize / args.nProcs)
+        args.advBatchSize = int(args.advBatchSize / args.nProcs)
         args.workers = int(args.workers / args.nProcs)
     else:
         trainSampler = None
@@ -195,8 +217,8 @@ def main_worker(gpu, args):
                                                   num_workers=args.workers, pin_memory=True, sampler=trainSampler, drop_last=True)
 
     print('- Instantiating new model with {} backbone'.format(args.encArch))
-    model = SSL_Model.Base_Model(args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
-                                 args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG)
+    model = SSLAE_Model.Base_Model(args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
+                                 args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, args.decArch)
 
     print('- Setting up model on single/multiple devices')
     if args.multiprocDistrib:
@@ -217,15 +239,17 @@ def main_worker(gpu, args):
     else:
         raise NotImplementedError('CPU training not supported')
 
-    print('- Instantiating loss function')
-    if args.lossType == 'wince':
-        lossFn = SSL_Model.Weighted_InfoNCE_Loss(args.symmetrizeLoss, args.winceBeta, args.winceTau)
-    elif args.lossType == 'bt':
-        lossFn = SSL_Model.Barlow_Twins_Loss(args.symmetrizeLoss, args.btLam, args.btLossType)
-    elif args.lossType == 'vicreg':
-        lossFn = SSL_Model.VICReg_Loss(args.symmetrizeLoss, args.vicAlpha, args.vicBeta, args.vicGamma)
-    #elif args.lossType == 'mec':
-    #    lossFn = SSL_Model.MEC_Loss(args.symmetrizeLoss, args.mecEd2, args.mecTaylorTerms)
+    print('- Instantiating loss functions')
+    if args.sslLossType == 'wince':
+        sslLossFn = SSLAE_Loss.Weighted_InfoNCE_Loss(args.symmetrizeLoss, args.winceBeta, args.winceTau)
+    elif args.sslLossType == 'bt':
+        sslLossFn = SSLAE_Loss.Barlow_Twins_Loss(args.symmetrizeLoss, args.btLam, args.btLossType)
+    elif args.sslLossType == 'vicreg':
+        sslLossFn = SSLAE_Loss.VICReg_Loss(args.symmetrizeLoss, args.vicAlpha, args.vicBeta, args.vicGamma)
+    #elif args.sslLossType == 'mec':
+    #    sslLossFn = SSLAE_Model.MEC_Loss(args.symmetrizeLoss, args.mecEd2, args.mecTaylorTerms)
+    if args.decArch is not None and args.aeLossType == 'mse':
+        aeLossFn = SSLAE_Loss.MSE_Loss(args.symmetrizeLoss)
 
     # Instantiate custom optimizer that skips momentum encoder and applies decay
     print('- Instantiating optimizer')
@@ -233,14 +257,18 @@ def main_worker(gpu, args):
         optimParams = [{'params': model.module.encoder.parameters(), 'decayLR': args.decayEncLR},
                        {'params': model.module.projector.parameters(), 'decayLR': args.decayEncLR},
                        {'params': model.module.predictor.parameters(), 'decayLR': args.decayPrdLR}]
+        if args.decArch is not None:
+            optimParams.append({'params': model.module.decoder.parameters(), 'decayLR': args.decayEncLR})
     else:
         optimParams = [{'params': model.encoder.parameters(), 'decayLR': args.decayEncLR},
                        {'params': model.projector.parameters(), 'decayLR': args.decayEncLR},
                        {'params': model.predictor.parameters(), 'decayLR': args.decayPrdLR}]
+        if args.decArch is not None:
+            optimParams.append({'params': model.decoder.parameters(), 'decayLR': args.decayEncLR})
     optimizer = torch.optim.SGD(params=optimParams, lr=args.initLR, momentum=args.momentum, weight_decay=args.weightDecay)
     if args.useLARS:
         print("- Using LARS optimizer.")
-        from Apex_LARC import LARC
+        from Utils.Apex_LARC import LARC
         optimizer = LARC(optimizer=optimizer, trust_coefficient=0.001, clip=False)
 
     # Optionally resume model/optimizer from checkpoint
@@ -249,14 +277,15 @@ def main_worker(gpu, args):
         # Map model to be loaded to specified single GPU
         chkPt = torch.load(args.loadChkPt, map_location='cuda:{}'.format(args.gpu))
         args.startEpoch = chkPt['epoch'] + 1
-        model.load_state_dict(chkPt['stateDict'], strict=False)
+        model.load_state_dict(chkPt['stateDict'], strict=True)
         optimizer.load_state_dict(chkPt['optimStateDict'])
+        del chkPt  # to save space
 
     # Initialize probes for training metrics, checkpoint initial model, and start timer
     if args.runProbes:
-        probes = SSL_Probes.Pretrain_Probes()
+        probes = CP.Pretrain_Probes()
     save_chkpt(args.ptPrefix, 0, args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
-              args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, model, optimizer)
+              args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, args.decArch, model, optimizer)
     timeStart = time.time()
 
     print('- Beginning training')
@@ -282,18 +311,23 @@ def main_worker(gpu, args):
         # Set model to train and reset sum of losses for each epoch
         model.train()
         sumLoss = 0.0
+        sumSSLLoss = 0.0
+        sumAELoss = 0.0
 
         for batchI, batch in enumerate(trainDataLoader):
 
+            srcList = []
+            for srcTens in batch[0][0]:
+                srcList.append(srcTens.cuda(args.gpu, non_blocking=True))
+
             augList = []
-            for augTens in batch[0]:
+            for augTens in batch[0][1]:
                 augList.append(augTens.cuda(args.gpu, non_blocking=True))
 
             if any(args.useAdvList):
 
-                _, advTensList = FGSM_PGD.ssl_pgd(model, lossFn, augList, args.useAdvList, args.advAlpha, args.advEps,
-                                                  args.advNorm, args.advRestarts, args.advSteps, args.advBatchSize,
-                                                  targeted=False, rand_init=args.advNoise)
+                _, advTensList = FGSM_PGD.ssl_pgd(model, sslLossFn, augList, args.useAdvList, args.advAlpha, args.advEps, args.advNorm,
+                                                  args.advRestarts, args.advSteps, args.advBatchSize, targeted=False, rand_init=args.advNoise)
 
                 for i in range(len(advTensList)):
                     if args.keepStd:
@@ -301,18 +335,26 @@ def main_worker(gpu, args):
                     else:
                         augList[i] = advTensList[i].detach()
 
-            # Reset outputs list
+            # Reset outputs lists
             outList = []
+            recList = []
 
             # Loop through each of the augs and create a list of results
             for augTens in augList:
 
                 # Get input tensor, push through model, and append to output list
-                p, z, r, mz = model(augTens)
+                p, z, r, mz, xd = model(augTens)
                 outList.append([p, z, r, mz])
+                recList.append(xd)
 
             # Calculate loss
-            lossVal = lossFn.forward(outList)
+            sslLossVal = sslLossFn.forward(outList)
+            if args.decArch is not None:
+                aeLossVal = aeLossFn.forward(recList, srcList)
+                lossVal = (1 - args.aeLossFactor) * sslLossVal + args.aeLossFactor * aeLossVal
+            else:
+                aeLossVal = torch.tensor([0.])
+                lossVal = sslLossVal
 
             # Backpropagate
             model.zero_grad()  # momenc and optPrd not included in optimizer, but they don't use grads - this should be redundant
@@ -329,9 +371,11 @@ def main_worker(gpu, args):
 
             # Keep running sum of loss
             sumLoss += lossVal.detach()
+            sumSSLLoss += sslLossVal.detach()
+            sumAELoss += aeLossVal.detach()
 
-        print('Epoch: {} / {} | Elapsed Time: {:0.2f} | Avg Loss: {:0.4f}'
-              .format(epoch, args.nEpochs, time.time() - timeStart, sumLoss / (batchI + 1)))
+        print('Epoch: {} / {} | Time: {:0.2f} | Avg Loss: {:0.4f} | Avg SSL Loss: {:0.4f} | Avg AE Loss: {:0.4f}'
+              .format(epoch, args.nEpochs, time.time() - timeStart, sumLoss / (batchI + 1), sumSSLLoss / (batchI + 1), sumAELoss / (batchI + 1)))
 
         # Track record metrics while running
         if args.runProbes:
@@ -357,7 +401,7 @@ def main_worker(gpu, args):
             # Note that p1, z1, and mz2 are L2 normd, as SimSiam, BYOL, InfoNCE, and MEC use L2 normalized encodings
             # This is taken care of in loss functions, but I have to do it explicitly here
             # This probe update is inaccurate for softmax-normalized encs (DINO, SwAV) or batch normalized encs (Barlow Twins)
-            probes.update_probes(epoch, lossVal.detach(),
+            probes.update_probes(epoch, lossVal.detach(), sslLossVal.detach(), aeLossVal.detach(),
                                  (p1 / torch.linalg.vector_norm(p1, dim=-1, keepdim=True)).detach(),
                                  (z1 / torch.linalg.vector_norm(z1, dim=-1, keepdim=True)).detach(),
                                  r1.detach(), r2.detach(),
@@ -366,7 +410,7 @@ def main_worker(gpu, args):
         # Checkpoint model
         if epoch in [1, 10] or (epoch <= 200 and epoch % 20 == 0) or (epoch > 200 and epoch % 50 == 0):
             save_chkpt(args.ptPrefix, epoch, args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim,
-                       args.prdDim, args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, model, optimizer)
+                       args.prdDim, args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, args.decArch, model, optimizer)
 
     # Postprocessing and outputs
 
@@ -380,6 +424,8 @@ def main_worker(gpu, args):
         writer = csv.writer(open('Pretrain_Output.csv', 'w', newline=''))
         writer.writerow(['Epoch'] + epochList)
         writer.writerow(['Loss'] + [probes.lossProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['SSL Loss'] + [probes.sslLossProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['AE Loss'] + [probes.aeLossProbe.storeList[epIdx - 1] for epIdx in epochList])
         writer.writerow(['R1-R2 Sim'] + [probes.r1r2AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
         writer.writerow(['R1 SelfSim'] + [probes.r1AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
         writer.writerow(['R1 Var'] + [probes.r1VarProbe.storeList[epIdx - 1] for epIdx in epochList])
