@@ -317,12 +317,13 @@ def main_worker(gpu, args):
         for batchI, batch in enumerate(trainDataLoader):
 
             srcList = []
-            for srcTens in batch[0][0]:
-                srcList.append(srcTens.cuda(args.gpu, non_blocking=True))
-
             augList = []
-            for augTens in batch[0][1]:
-                augList.append(augTens.cuda(args.gpu, non_blocking=True))
+            for i in range(args.nAugs):
+                if args.decArch is not None:
+                    srcList.append(batch[0][0][i].cuda(args.gpu, non_blocking=True))
+                    augList.append(batch[0][1][i].cuda(args.gpu, non_blocking=True))
+                else:
+                    augList.append(batch[0][i].cuda(args.gpu, non_blocking=True))
 
             if any(args.useAdvList):
 
@@ -353,7 +354,7 @@ def main_worker(gpu, args):
                 aeLossVal = aeLossFn.forward(recList, srcList)
                 lossVal = (1 - args.aeLossFactor) * sslLossVal + args.aeLossFactor * aeLossVal
             else:
-                aeLossVal = torch.tensor([0.])
+                aeLossVal = torch.tensor(0.)
                 lossVal = sslLossVal
 
             # Backpropagate
