@@ -7,8 +7,8 @@ import torch
 from torch import nn
 import torchvision.datasets as datasets
 
-import SSL_Transforms
-import SSL_Model
+import Utils.Custom_Transforms as CT
+import SSLAE_Model
 
 ###############
 # User Inputs #
@@ -17,21 +17,21 @@ import SSL_Model
 device = torch.device('cuda')
 
 # Data information
-data1Root = r'D:/CIFAR-10/train'
+data1Root = r'D:/ImageNet-10/train'
 rep1Idx = 2
 rep1Dim = 512
 label1 = 'Clean'
-data2Root = r'D:/CIFAR-10/Poisoned/EM_S'
+data2Root = r'D:/ImageNet-10/Poisoned/CUDA_10/train'
 rep2Idx = 2
 rep2Dim = 512
-label2 = 'EM'
+label2 = 'CUDA'
 
 # Model data
-ptFile = r'Saved_Models/CIFAR10/SimSiam_He2023/EM_pt_1000.pth.tar'
-ftFile = r'Saved_Models/CIFAR10/SimSiam_He2023/EM_pt_1000_EM_lp_0100.pth.tar'
-useFinetune = False
+ptFile = r'Saved_Models/CIFAR-10//CUDA_pt_0400.pth.tar'
+ftFile = r'Saved_Models/ImageNet-100/SSL_He2023_400ep/CUDA/CUDA_pt_0400_CUDA_lp_0100.pth.tar'
+useFinetune = True
 
-cropSize = 28
+cropSize = 224
 
 batchSize = 256
 bankBatches = 5
@@ -44,7 +44,7 @@ useClsList = list(range(4))
 
 def make_rep_bank(model, loader, batchSize, nBankBatches, repIdx, repDim, useClsList):
 
-    inpBank = torch.zeros(nBankBatches * batchSize, 3 * 28 * 28)
+    inpBank = torch.zeros(nBankBatches * batchSize, 3 * cropSize * cropSize)
     repBank = torch.zeros(nBankBatches * batchSize, repDim)
     labelBank = torch.zeros(nBankBatches * batchSize)
 
@@ -75,8 +75,8 @@ def make_rep_bank(model, loader, batchSize, nBankBatches, repIdx, repDim, useCls
 # Data Setup #
 ##############
 
-data1Dataset = datasets.ImageFolder(data1Root, SSL_Transforms.MoCoV2Transform('test', cropSize))
-data2Dataset = datasets.ImageFolder(data2Root, SSL_Transforms.MoCoV2Transform('test', cropSize))
+data1Dataset = datasets.ImageFolder(data1Root, CT.t_test(cropSize))
+data2Dataset = datasets.ImageFolder(data2Root, CT.t_test(cropSize))
 
 nClasses = len(data1Dataset.classes)
 
@@ -91,8 +91,8 @@ data2Loader = torch.utils.data.DataLoader(data2Dataset, batch_size=batchSize, sh
 ptStateDict = torch.load(ptFile, map_location='cuda:{}'.format(0))
 
 # Create model and load model weights
-model = SSL_Model.Base_Model(ptStateDict['encArch'], ptStateDict['cifarMod'], ptStateDict['encDim'],
-                             ptStateDict['prjHidDim'], ptStateDict['prjOutDim'], ptStateDict['prdDim'], None, 0.3, 0.5, 0.0, True)
+model = SSLAE_Model.Base_Model(ptStateDict['encArch'], ptStateDict['cifarMod'], ptStateDict['encDim'],
+                             ptStateDict['prjHidDim'], ptStateDict['prjOutDim'], ptStateDict['prdDim'], None, 0.3, 0.5, 0.0, True, None)
 
 # If a stateDict key has "module" in (from running parallel), create a new dictionary with the right names
 for key in list(ptStateDict['stateDict'].keys()):

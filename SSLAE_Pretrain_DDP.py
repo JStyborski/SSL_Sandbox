@@ -46,12 +46,12 @@ parser.add_argument('--cropSize', default=224, type=int, help='Crop size to use 
 parser.add_argument('--nAugs', default=2, type=int, help='Number of augmentations to apply to each batch')
 
 # Training parameters
-parser.add_argument('--nEpochs', default=100, type=int, help='Number of epochs to run')
+parser.add_argument('--nEpochs', default=200, type=int, help='Number of epochs to run')
 parser.add_argument('--startEpoch', default=1, type=int, help='Epoch at which to start')
-parser.add_argument('--batchSize', default=512, type=int, help='Data loader batch size')
+parser.add_argument('--batchSize', default=128, type=int, help='Data loader batch size')
 parser.add_argument('--momentum', default=0.9, type=float, help='SGD momentum value')
 parser.add_argument('--weightDecay', default=1e-4, type=float, help='SGD weight decay value')
-parser.add_argument('--initLR', default=0.05, type=float, help='SGD initial learning rate')
+parser.add_argument('--initLR', default=0.5, type=float, help='SGD initial learning rate')
 parser.add_argument('--useLARS', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply LARS optimizer')
 parser.add_argument('--decayEncLR', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to apply cosine decay to encoder/projector learning rate')
 parser.add_argument('--decayPrdLR', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply cosine decay to predictor learning rate')
@@ -62,7 +62,6 @@ parser.add_argument('--runProbes', default=True, type=lambda x:bool(strtobool(x)
 # Model parameters
 parser.add_argument('--encArch', default='resnet18', type=str, help='Encoder network (backbone) type')
 parser.add_argument('--cifarMod', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply CIFAR modification to ResNets')
-parser.add_argument('--encDim', default=512, type=int, help='Encoder output dimension')
 parser.add_argument('--prjHidDim', default=2048, type=int, help='Projector hidden dimension')
 parser.add_argument('--prjOutDim', default=2048, type=int, help='Projector output dimension')
 parser.add_argument('--prdDim', default=512, type=int, help='Predictor hidden dimension - set as 0 for no predictor')
@@ -103,8 +102,8 @@ parser.add_argument('--advRestarts', default=1, type=int, help='Number of PGD re
 # Misc Functions #
 ##################
 
-def save_chkpt(prefix, epoch, encArch, cifarMod, encDim, prjHidDim, prjOutDim, prdDim, prdAlpha, prdEps, prdBeta, momEncBeta, applySG, decArch, model, optimizer):
-    torch.save({'epoch': epoch, 'encArch': encArch, 'cifarMod': cifarMod, 'encDim': encDim, 'prjHidDim': prjHidDim, 'prjOutDim': prjOutDim,
+def save_chkpt(prefix, epoch, encArch, cifarMod, prjHidDim, prjOutDim, prdDim, prdAlpha, prdEps, prdBeta, momEncBeta, applySG, decArch, model, optimizer):
+    torch.save({'epoch': epoch, 'encArch': encArch, 'cifarMod': cifarMod, 'prjHidDim': prjHidDim, 'prjOutDim': prjOutDim,
                 'prdDim': prdDim, 'prdAlpha': prdAlpha, 'prdEps': prdEps, 'prdBeta': prdBeta, 'momEncBeta': momEncBeta, 'applySG': applySG,
                 'decArch': decArch, 'stateDict': model.state_dict(), 'optimStateDict': optimizer.state_dict()},
                'Trained_Models/{}_pt_{:04d}.pth.tar'.format(prefix, epoch))
@@ -122,11 +121,10 @@ def main():
 
     args = parser.parse_args()
 
-    #args.trainRoot = r'D:/ImageNet-100/Poisoned/TAP_100/train'
-    #args.ptPrefix = 'TAP'
-    #args.nEpochs = 200
-    #args.batchSize = 32
-    #args.initLR = 0.5
+    args.trainRoot = r'D:/ImageNet-100/Poisoned/TAP_100/train'
+    args.ptPrefix = 'Clean'
+    args.batchSize = 64
+    args.nEpochs = 1
     #args.decArch = args.encArch
 
     if args.randSeed is not None:
@@ -217,7 +215,7 @@ def main_worker(gpu, args):
                                                   num_workers=args.workers, pin_memory=True, sampler=trainSampler, drop_last=True)
 
     print('- Instantiating new model with {} backbone'.format(args.encArch))
-    model = SSLAE_Model.Base_Model(args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
+    model = SSLAE_Model.Base_Model(args.encArch, args.cifarMod, args.prjHidDim, args.prjOutDim, args.prdDim,
                                  args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, args.decArch)
 
     print('- Setting up model on single/multiple devices')
@@ -276,6 +274,11 @@ def main_worker(gpu, args):
         print('- Loading checkpoint file {}'.format(args.loadChkPt))
         # Map model to be loaded to specified single GPU
         chkPt = torch.load(args.loadChkPt, map_location='cuda:{}'.format(args.gpu))
+        # If a stateDict key has "module" in (from running parallel), create a new dictionary with the right names
+        #for key in list(chkPt['stateDict'].keys()):
+        #    if key.startswith('module.'):
+        #        chkPt['stateDict'][key[7:]] = chkPt['stateDict'][key]
+        #        del chkPt['stateDict'][key]
         args.startEpoch = chkPt['epoch'] + 1
         model.load_state_dict(chkPt['stateDict'], strict=True)
         optimizer.load_state_dict(chkPt['optimStateDict'])
@@ -284,7 +287,7 @@ def main_worker(gpu, args):
     # Initialize probes for training metrics, checkpoint initial model, and start timer
     if args.runProbes:
         probes = CP.Pretrain_Probes()
-    save_chkpt(args.ptPrefix, 0, args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim, args.prdDim,
+    save_chkpt(args.ptPrefix, 0, args.encArch, args.cifarMod, args.prjHidDim, args.prjOutDim, args.prdDim,
               args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, args.decArch, model, optimizer)
     timeStart = time.time()
 
@@ -410,7 +413,7 @@ def main_worker(gpu, args):
 
         # Checkpoint model
         if epoch in [1, 10] or (epoch <= 200 and epoch % 20 == 0) or (epoch > 200 and epoch % 50 == 0):
-            save_chkpt(args.ptPrefix, epoch, args.encArch, args.cifarMod, args.encDim, args.prjHidDim, args.prjOutDim,
+            save_chkpt(args.ptPrefix, epoch, args.encArch, args.cifarMod, args.prjHidDim, args.prjOutDim,
                        args.prdDim, args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, args.decArch, model, optimizer)
 
     # Postprocessing and outputs
@@ -429,8 +432,11 @@ def main_worker(gpu, args):
         writer.writerow(['AE Loss'] + [probes.aeLossProbe.storeList[epIdx - 1] for epIdx in epochList])
         writer.writerow(['R1-R2 Sim'] + [probes.r1r2AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
         writer.writerow(['R1 SelfSim'] + [probes.r1AugSimProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['R1-R2 Conc'] + [probes.r1r2AugConcProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['R1 Conc'] + [probes.r1AugConcProbe.storeList[epIdx - 1] for epIdx in epochList])
         writer.writerow(['R1 Var'] + [probes.r1VarProbe.storeList[epIdx - 1] for epIdx in epochList])
         writer.writerow(['R1 Corr Str'] + [probes.r1CorrStrProbe.storeList[epIdx - 1] for epIdx in epochList])
+        writer.writerow(['R1-R2 Mutual Info'] + [probes.r1r2InfoBoundProbe.storeList[epIdx - 1] for epIdx in epochList])
         writer.writerow(['R1 E-Rank'] + [probes.r1EigERankProbe.storeList[epIdx - 1] for epIdx in epochList])
         writer.writerow(['P1 Entropy'] + [probes.p1EntropyProbe.storeList[epIdx - 1] for epIdx in epochList])
         writer.writerow(['MZ2 Entropy'] + [probes.mz2EntropyProbe.storeList[epIdx - 1] for epIdx in epochList])

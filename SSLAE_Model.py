@@ -21,7 +21,7 @@ def get_activation(name):
     return hook
 
 class Base_Model(nn.Module):
-    def __init__(self, encArch=None, cifarMod=False, encDim=512, prjHidDim=2048, prjOutDim=2048, prdDim=512,
+    def __init__(self, encArch=None, cifarMod=False, prjHidDim=2048, prjOutDim=2048, prdDim=512,
                  prdAlpha=None, prdEps=0.3, prdBeta=0.5, momEncBeta=0, applySG=True, decArch=None):
         super(Base_Model, self).__init__()
         self.prdAlpha = prdAlpha
@@ -32,13 +32,16 @@ class Base_Model(nn.Module):
         self.applySG = applySG
         self.decArch = decArch
 
-        self.encoder = models.__dict__[encArch](num_classes=encDim, zero_init_residual=True)
-        self.encoder.fc = nn.Identity(encDim)
+        self.encoder = models.__dict__[encArch](zero_init_residual=True)
+        self.encoder.fc = nn.Identity()
 
         # CIFAR ResNet mod
         if 'resnet' in encArch and cifarMod:
             self.encoder.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=2, bias=False)
             self.encoder.maxpool = nn.Identity()
+
+        # Get encoding dimension
+        encDim = self.encoder.inplanes if 'resnet' in encArch else self.encoder.num_features
 
         self.projector = nn.Sequential(
             nn.Linear(encDim, prjHidDim, bias=False),

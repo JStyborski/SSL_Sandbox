@@ -37,7 +37,7 @@ parser.add_argument('--randSeed', default=None, type=int, help='RNG initial set 
 
 # Dataset parameters
 parser.add_argument('--ptFile', default='', type=str, help='Single pretrained model to train - if empty, finetunes all in ptDir')
-parser.add_argument('--ptDir', default='', type=str, help='Folder containing pretrained models')
+parser.add_argument('--ptDir', default='Trained_Models', type=str, help='Folder containing pretrained models')
 parser.add_argument('--trainRoot', default='', type=str, help='Training dataset root directory')
 parser.add_argument('--ftPrefix', default='', type=str, help='Prefix to add to finetuned file name')
 parser.add_argument('--ftType', default='lp', type=str, help='Type of finetuning to apply - linear probe or finetune')
@@ -78,6 +78,21 @@ parser.add_argument('--advRestarts', default=1, type=int, help='Number of PGD re
 def main():
 
     args = parser.parse_args()
+
+    # HY Adversarial Training Overwrites
+    #args.ptDir = 'Trained_Models'
+    #args.trainRoot = r'D:/ImageNet-100/Poisoned/RUE_100'
+    #args.ftPrefix = 'RUE'
+    #args.ftType = 'ft'
+    #args.batchSize = 128
+    #args.weightDecay = 0.0005
+    #args.initLR = 0.2
+    #args.decaySteps = [40, 80]
+    #args.decayFactor = 0.1
+    #args.useAdv = True
+    #args.advBatchSize = 128
+    #args.advAlpha = 0.6/255
+    #args.advEps = 4/255
 
     if args.randSeed is not None:
         random.seed(args.randSeed)
@@ -166,8 +181,8 @@ def main_worker(gpu, args):
         stateDict = torch.load(stateFile, map_location='cuda:{}'.format(args.gpu))
 
         print('- Instantiating new model with {} backbone'.format(stateDict['encArch']))
-        model = SSLAE_Model.Base_Model(stateDict['encArch'], stateDict['cifarMod'], stateDict['encDim'],
-                                     stateDict['prjHidDim'], stateDict['prjOutDim'], stateDict['prdDim'], None, 0.3, 0.5, 0.0, True, None)
+        model = SSLAE_Model.Base_Model(stateDict['encArch'], stateDict['cifarMod'], stateDict['prjHidDim'], stateDict['prjOutDim'],
+                                       stateDict['prdDim'], None, 0.3, 0.5, 0.0, True, None)
 
         # If a stateDict key has "module" in (from running parallel), create a new dictionary with the right names
         for key in list(stateDict['stateDict'].keys()):
@@ -183,8 +198,9 @@ def main_worker(gpu, args):
             for param in model.parameters(): param.requires_grad = False
 
         # Replace the projector with identity and the predictor with linear classifier
-        model.projector = nn.Identity(stateDict['encDim'])
-        model.predictor = nn.Linear(stateDict['encDim'], args.nClasses)
+        encDim = model.encoder.inplanes if 'resnet' in stateDict['encArch'] else model.encoder.num_features
+        model.projector = nn.Identity()
+        model.predictor = nn.Linear(encDim, args.nClasses)
 
         print('- Setting up model on single/multiple devices')
         if args.multiprocDistrib:

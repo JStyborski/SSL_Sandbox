@@ -33,11 +33,13 @@ class Pretrain_Probes:
         self.aeLossProbe = Probe()
         self.r1r2AugSimProbe = Probe()
         self.r1AugSimProbe = Probe()
+        self.r1r2AugConcProbe = Probe()
+        self.r1AugConcProbe = Probe()
         self.r1VarProbe = Probe()
         self.r1CorrStrProbe = Probe()
+        self.r1r2InfoBoundProbe = Probe()
         self.r1EigProbe = Probe()
         self.r1EigERankProbe = Probe()
-        self.r1LolipProbe = Probe()
         self.p1EntropyProbe = Probe()
         self.mz2EntropyProbe = Probe()
         self.mz2p1KLDivProbe = Probe()
@@ -71,11 +73,17 @@ class Pretrain_Probes:
         # Get cosine similarity between encodings
         self.r1r2AugSimProbe.store(np.mean(AU.cos_sim_bt_vecs(r1, r2)))
         self.r1AugSimProbe.store(np.mean(AU.cos_sim_within_array(r1)))
+        # Get concentration (like inverse uniformity) between encodings
+        # Equation derived from Uniformity measure in section 4.1.2 (page 5) of Wang/Isola for t=2: https://arxiv.org/abs/2005.10242
+        self.r1r2AugConcProbe.store(np.mean(np.exp(4 * AU.cos_sim_bt_vecs(r1, r2) - 4)))
+        self.r1AugConcProbe.store(np.mean(np.exp(4 * AU.cos_sim_within_array(r1) - 4)))
         # Representation variance (complete collapse measure)
         self.r1VarProbe.store(np.mean(np.var(r1, axis=0)))
         # Representation correlation strength (off-diag corr values)
         r1Corr = AU.cross_corr(r1, r1)
         self.r1CorrStrProbe.store(np.mean(np.abs(r1Corr[np.triu_indices(m=r1Corr.shape[0], k=1, n=r1Corr.shape[1])])))
+        # Mutual information between views using InfoNCE bound
+        self.r1r2InfoBoundProbe.store(AU.infonce_bound(r1, r2))
         # Representation encoding correlation ERank
         r1Eigvals, _ = AU.array_eigdecomp(r1, covOrCor='cor')
         # self.r1EigProbe.store(r1Eigvals)

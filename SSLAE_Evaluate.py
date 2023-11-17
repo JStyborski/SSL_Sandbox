@@ -9,7 +9,6 @@ import Utils.Custom_Transforms as CT
 import Utils.Custom_Probes as CP
 from Adversarial import FGSM_PGD, Local_Lip
 
-
 ###############
 # User Inputs #
 ###############
@@ -17,7 +16,7 @@ from Adversarial import FGSM_PGD, Local_Lip
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Load data
-trainRoot = r'D:/ImageNet-100/Poisoned/TAP_100/train'
+trainRoot = r'D:/ImageNet-100/train'
 testRoot = r'D:/ImageNet-100/val'
 
 # Find pretrained models
@@ -25,7 +24,7 @@ dirName = 'Trained_Models'
 fileList = os.listdir(dirName)
 ptList = sorted([dirName + '/' + stateFile for stateFile in fileList
                  if ('_pt_' in stateFile and '_lp_' not in stateFile and '_ft_' not in stateFile)])
-#args.ptList = [args.ptDir + '/my_nice_pretrain_file.pth.tar']
+#ptList = [dirName + '/LSP_pt_0200.pth.tar']
 ftType = 'lp' # 'lp' or 'ft'
 
 # Data parameters
@@ -76,7 +75,6 @@ nClasses = len(trainDataset.classes)
 #############################
 # Define Setup and Training #
 #############################
-
 
 def make_rep_bank(loader, batchSize, model, encDim, nBankBatches):
 
@@ -216,8 +214,8 @@ for stateFile in ptList:
     ptStateDict = torch.load(stateFile, map_location='cuda:{}'.format(0))
 
     # Create model and load model weights
-    model = SSLAE_Model.Base_Model(ptStateDict['encArch'], ptStateDict['cifarMod'], ptStateDict['encDim'],
-                                 ptStateDict['prjHidDim'], ptStateDict['prjOutDim'], ptStateDict['prdDim'], None, 0.3, 0.5, 0.0, True, None)
+    model = SSLAE_Model.Base_Model(ptStateDict['encArch'], ptStateDict['cifarMod'], ptStateDict['prjHidDim'], ptStateDict['prjOutDim'],
+                                   ptStateDict['prdDim'], None, 0.3, 0.5, 0.0, True, None)
 
     # If a stateDict key has "module" in (from running parallel), create a new dictionary with the right names
     for key in list(ptStateDict['stateDict'].keys()):
@@ -229,8 +227,9 @@ for stateFile in ptList:
     model.load_state_dict(ptStateDict['stateDict'], strict=False)
 
     # Replace the projector with identity and the predictor with linear classifier
-    model.projector = nn.Identity(ptStateDict['encDim'])
-    model.predictor = nn.Linear(ptStateDict['encDim'], nClasses)
+    encDim = model.encoder.inplanes if 'resnet' in ptStateDict['encArch'] else model.encoder.num_features
+    model.projector = nn.Identity()
+    model.predictor = nn.Linear(encDim, nClasses)
 
     # Freeze model parameters (mostly to reduce computation - grads for Lolip and AdvAtk can still propagate through)
     for param in model.parameters(): param.requires_grad = False
@@ -240,7 +239,7 @@ for stateFile in ptList:
     model.eval()
 
     # Make a representation bank (useful for KNN and for probe metrics)
-    repBank, labelBank = make_rep_bank(knnTrainLoader, batchSize, model, ptStateDict['encDim'], repBankBatches)
+    repBank, labelBank = make_rep_bank(knnTrainLoader, batchSize, model, encDim, repBankBatches)
 
     # Evaluate representation smoothness
     avgRepLolip = calculate_smoothness(atkLoader, model)
@@ -251,12 +250,12 @@ for stateFile in ptList:
         knnBank = repBank
         knnLabelBank = labelBank
     else:
-        knnBank, knnLabelBank = make_rep_bank(knnTrainLoader, batchSize, model, ptStateDict['encDim'], knnBankBatches)
+        knnBank, knnLabelBank = make_rep_bank(knnTrainLoader, batchSize, model, encDim, knnBankBatches)
     knnAcc = knn_vote(knnTestLoader, knnBank, knnLabelBank, k, knnTestBatches)
     print('KNN Accuracy: {:0.4f}'.format(knnAcc))
 
     # Declare finetune file name and check if it already exists
-    ptPrefix = (stateFile[:-8] + '_').split('/')[1]
+    ptPrefix = (stateFile[:-8] + '_').split('/')[-1]
     ftPrefix = '_' + ftType + '_'
     ftFiles = sorted([dirName + '/' + file for file in fileList if (ptPrefix in file and ftPrefix in file)])
     for ftFile in ftFiles:

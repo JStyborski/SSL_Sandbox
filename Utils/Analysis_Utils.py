@@ -98,13 +98,13 @@ def dist_within_array(xArr, p=2):
     Calculate the distance between every vector in an array with every other vector in the same array
     :param xArr: [array or tensor] [m x n] - Array of multiple vectors
     :param p: [float] [1, 2, or np.inf] - Norm to use for distance calculation
-    :return distList: [list of floats] [1]
+    :return distArr: [array] [m * (m-1) / 2]
     """
     distList = []
     for i in range(xArr.shape[0] - 1):
         for j in range(i + 1, xArr.shape[0]):
             distList.append(dist_bt_vecs(xArr[[i], :], xArr[[j], :], p=p)[0, 0])
-    return distList
+    return np.array(distList)
 
 
 def dist_bt_arrays(xArr1, xArr2, p=2):
@@ -113,13 +113,13 @@ def dist_bt_arrays(xArr1, xArr2, p=2):
     :param xArr1: [array or tensor] [m x n] - Array of multiple vectors
     :param xArr2: [array or tensor] [m x n] - Array of multiple vectors
     :param p: [float] [1, 2, or np.inf] - Norm to use for distance calculation
-    :return distList: [list of floats] [1]
+    :return distList: [array] [m * n]
     """
     distList = []
     for i in range(xArr1.shape[0]):
         for j in range(xArr2.shape[0]):
             distList.append(dist_bt_vecs(xArr1[[i], :], xArr2[[j], :], p=p)[0, 0])
-    return distList
+    return np.array(distList)
 
 
 def cos_sim_bt_vecs(xArr1, xArr2, normalize=True):
@@ -146,9 +146,9 @@ def cos_sim_within_array(xArr, normalize=True):
     """
     if normalize:
         xArr /= np.linalg.norm(xArr, axis=1, keepdims=True)
-    simArr = np.tensordot(xArr, xArr, axes=(-1, -1))
-    simList = simArr[np.triu_indices(m=simArr.shape[0], k=1, n=simArr.shape[1])].reshape(1, -1)[0].tolist()
-    return simList
+    cosSimArr = np.tensordot(xArr, xArr, axes=(-1, -1))
+    cosSimArr = cosSimArr[np.triu_indices(m=cosSimArr.shape[0], k=1, n=cosSimArr.shape[1])].reshape(1, -1)[0]
+    return cosSimArr
 
 
 def cos_sim_bt_arrays(xArr1, xArr2, normalize=True):
@@ -162,8 +162,8 @@ def cos_sim_bt_arrays(xArr1, xArr2, normalize=True):
     if normalize:
         xArr1 /= np.linalg.norm(xArr1, axis=1, keepdims=True)
         xArr2 /= np.linalg.norm(xArr2, axis=1, keepdims=True)
-    simList = np.tensordot(xArr1, xArr2, axes=(-1, -1)).reshape(1, -1)[0].tolist()
-    return simList
+    cosSimArr = np.tensordot(xArr1, xArr2, axes=(-1, -1)).reshape(1, -1)[0]
+    return cosSimArr
 
 
 def softmax(xArr):
@@ -223,13 +223,44 @@ def cross_ent_bt_arrays(xArr1, xArr2):
     Calculate the cross-entropy between every vector in one array and every vector in another array
     :param xArr1: [array or tensor] [m x n] - Array of multiple point vectors
     :param xArr2: [array or tensor] [m x n] - Array of multiple point vectors
-    :return simList: [list of floats] [1]
+    :return simList: [list of floats]
     """
     ceList = []
     for i in range(xArr1.shape[0]):
         for j in range(xArr2.shape[0]):
             ceList.append(cross_ent_bt_vecs(xArr1[[i], :], xArr2[[j], :])[0, 0])
     return ceList
+
+
+def infonce_bound(xArr1, xArr2, normalize=True, temperature=1.0):
+    """
+    Calculate the InfoNCE bound for mutual information between views: I(v1;v2) ≥ log(2b-1) - L_NCE_i = I_NCE(v1;v2)
+    Equation obtained from InfoMin paper: https://arxiv.org/abs/2005.10243
+    Implementation of InfoNCE loss from SimCLR paper: https://arxiv.org/abs/2002.05709
+    :param xArr1: [array] [b x d] - Array of multiple vectors
+    :param xArr2: [array] [b x d] - Array of multiple vectors
+    :param normalize: [Boolean] - Whether to divide the dot product by the vector magnitudes
+    :param temperature: [float] - Temperature factor applied to similarity terms
+    :return bound: [float]
+    """
+
+    # Calculate loss term due to positive similarities
+    posLoss = -1.0 * np.mean(cos_sim_bt_vecs(xArr1, xArr2, normalize))
+
+    # Calculate loss term due to negative similarities (both within batch and between batches)
+    if normalize:
+        xArr1 /= np.linalg.norm(xArr2, axis=1, keepdims=True)
+        xArr2 /= np.linalg.norm(xArr2, axis=1, keepdims=True)
+    negSameSim = np.tensordot(xArr1, xArr1, axes=(-1, -1))
+    np.fill_diagonal(negSameSim, 0.0)
+    negDiffSim = np.tensordot(xArr1, xArr2, axes=(-1, -1))
+    negLoss = np.mean(np.log(np.sum(np.exp(negSameSim / temperature), axis=-1, keepdims=True) +
+                               np.sum(np.exp(negDiffSim / temperature), axis=-1, keepdims=True)))
+
+    # Calculate the final bound
+    bound = np.log(2 * xArr1.shape[0] - 1) - (posLoss / temperature + negLoss)
+
+    return bound
 
 
 def array_sparsity(xArr):

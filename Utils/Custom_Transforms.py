@@ -4,6 +4,8 @@ import numpy as np
 import torch
 import torchvision.transforms as transforms
 
+import Utils.ResNet_AutoEncoder as RNAE
+
 def t_pretrain(cropSize):
     t = transforms.Compose([
         transforms.RandomResizedCrop(cropSize, scale=(0.2, 1.)),
@@ -12,6 +14,9 @@ def t_pretrain(cropSize):
         transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
+        #RandomFilter(),
+        #GaussianNoise(0.25),
+        #RandomMask(cropSize, 16, 0.7),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     return t
@@ -19,6 +24,7 @@ def t_pretrain(cropSize):
 def t_randcrop(cropSize):
     t = transforms.Compose([
         transforms.RandomResizedCrop(cropSize, scale=(0.2, 1.)),
+        transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
     ])
     return t
@@ -29,7 +35,6 @@ def t_toPIL_pretrain():
         transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
         transforms.RandomGrayscale(p=0.2),
         transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
-        transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
@@ -38,6 +43,10 @@ def t_toPIL_pretrain():
 def t_finetune(cropSize):
     t = transforms.Compose([
         transforms.RandomResizedCrop(cropSize),
+        # I saw one script use the transform below for SL. I think it is too simple, since it applies no scale or ratio
+        # Test performance increases ~1% on IN100 when finetuning with below. I think it's info leak, since test images are cropped the same way
+        #transforms.Resize(int(round(1.1428 * cropSize))),  # CIFAR: 1.1428 * 28 = 32, IN: 1.1428 * 224 = 256
+        #transforms.RandomCrop(cropSize),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -79,10 +88,10 @@ class RandomFilter(object):
         for i in range(self.nFilters):
             kernel = np.random.uniform(low=0, high=self.blurMag, size=(1, 1, self.kernelSize, self.kernelSize))
             if self.maxMag is not None:
-                kernel[0, 0, np.random.randint(kernel.shape[2]), np.random.randint(kernel.shape[3])] = self.maxMag
+                kernel[0, 0, np.random.randint(self.kernelSize), np.random.randint(self.kernelSize)] = self.maxMag
             kernel = np.repeat(kernel, 3, axis=0)
             x = torch.nn.functional.conv2d(x, torch.from_numpy(kernel).float(), stride=1, groups=3, padding='same')
-            x /= x.max()
+            x /= max(x.max(), 1e-6)
         return x
 
 
@@ -111,6 +120,19 @@ class RandomMask(object):
         x = x * mask
         return x
 
+class AutoEncode(object):
+
+    def __init__(self, encArch, gpu, aeStateFile):
+        configs, bottleneck = RNAE.get_configs(encArch)
+        self.ae = RNAE.ResNetAutoEncoder(configs, bottleneck).cuda(gpu)
+        stateDict = torch.load(aeStateFile, map_location='cuda:{}'.format(gpu))
+        self.ae.load_state_dict(stateDict['state_dict'], strict=True)
+        for param in self.ae.parameters(): param.requires_grad = False
+
+    def __call__(self, x):
+        # Note this expects x input as a 4D tensor and on the same device as the AE
+        x = self.ae(x)
+        return x
 
 class NTimesTransform:
     """Take n random crops of one image as the query and key."""
