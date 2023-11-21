@@ -120,19 +120,6 @@ class RandomMask(object):
         x = x * mask
         return x
 
-class AutoEncode(object):
-
-    def __init__(self, encArch, gpu, aeStateFile):
-        configs, bottleneck = RNAE.get_configs(encArch)
-        self.ae = RNAE.ResNetAutoEncoder(configs, bottleneck).cuda(gpu)
-        stateDict = torch.load(aeStateFile, map_location='cuda:{}'.format(gpu))
-        self.ae.load_state_dict(stateDict['state_dict'], strict=True)
-        for param in self.ae.parameters(): param.requires_grad = False
-
-    def __call__(self, x):
-        # Note this expects x input as a 4D tensor and on the same device as the AE
-        x = self.ae(x)
-        return x
 
 class NTimesTransform:
     """Take n random crops of one image as the query and key."""

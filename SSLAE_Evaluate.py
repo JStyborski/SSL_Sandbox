@@ -16,11 +16,11 @@ from Adversarial import FGSM_PGD, Local_Lip
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Load data
-trainRoot = r'D:/ImageNet-100/train'
+trainRoot = r'D:/ImageNet-100/Poisoned/TAP_100/train'
 testRoot = r'D:/ImageNet-100/val'
 
 # Find pretrained models
-dirName = 'Trained_Models'
+dirName = 'Saved_Models/ImageNet-100/SSL_ViT_Tiny/TAP'
 fileList = os.listdir(dirName)
 ptList = sorted([dirName + '/' + stateFile for stateFile in fileList
                  if ('_pt_' in stateFile and '_lp_' not in stateFile and '_ft_' not in stateFile)])
@@ -41,7 +41,7 @@ knnBankBatches = repBankBatches
 knnTestBatches = 5
 k = 20
 
-evalFinetune = True
+evalFinetune = False
 
 # LinCls parameters
 trainAccBatches = 1e6
@@ -214,8 +214,8 @@ for stateFile in ptList:
     ptStateDict = torch.load(stateFile, map_location='cuda:{}'.format(0))
 
     # Create model and load model weights
-    model = SSLAE_Model.Base_Model(ptStateDict['encArch'], ptStateDict['cifarMod'], ptStateDict['prjHidDim'], ptStateDict['prjOutDim'],
-                                   ptStateDict['prdDim'], None, 0.3, 0.5, 0.0, True, None)
+    model = SSLAE_Model.Base_Model(ptStateDict['encArch'], ptStateDict['cifarMod'], ptStateDict['vitPPFreeze'], ptStateDict['prjHidDim'],
+                                   ptStateDict['prjOutDim'], ptStateDict['prdDim'], None, 0.3, 0.5, 0.0, True, None)
 
     # If a stateDict key has "module" in (from running parallel), create a new dictionary with the right names
     for key in list(ptStateDict['stateDict'].keys()):
@@ -258,9 +258,9 @@ for stateFile in ptList:
     ptPrefix = (stateFile[:-8] + '_').split('/')[-1]
     ftPrefix = '_' + ftType + '_'
     ftFiles = sorted([dirName + '/' + file for file in fileList if (ptPrefix in file and ftPrefix in file)])
-    for ftFile in ftFiles:
+    if evalFinetune and len(ftFiles) > 0:
 
-        if evalFinetune and len(ftFiles) > 0:
+        for ftFile in ftFiles:
 
             print('Evaluating ' + ftFile)
 
@@ -287,14 +287,16 @@ for stateFile in ptList:
             advAcc = adv_attack(atkLoader, model, nn.NLLLoss(reduction='none'))
             print('Adv Accuracy: {:0.4f}'.format(advAcc))
 
-        else:
-            clnTrainAcc = None
-            clnTestAcc = None
-            advAcc = None
+            # Update probes for each ftFile
+            probes.update_probes(ptStateDict['epoch'], repBank, avgRepLolip, knnAcc, clnTrainAcc, clnTestAcc, advAcc)
 
-        # Update probes
+    else:
+        clnTrainAcc = None
+        clnTestAcc = None
+        advAcc = None
+
+        # Update probes even if no FT files were run
         probes.update_probes(ptStateDict['epoch'], repBank, avgRepLolip, knnAcc, clnTrainAcc, clnTestAcc, advAcc)
-
 
 ##################
 # Postprocessing #

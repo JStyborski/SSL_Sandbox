@@ -5,9 +5,9 @@ import numpy as np
 import psutil
 
 # Not used here, but in the calling script
-from fvcore.nn.activation_count import activation_count
-from fvcore.nn.flop_count import flop_count
-from fvcore.nn.parameter_count import parameter_count
+#from fvcore.nn.activation_count import activation_count
+#from fvcore.nn.flop_count import flop_count
+#from fvcore.nn.parameter_count import parameter_count
 
 import torch
 

@@ -65,6 +65,7 @@ class Weighted_InfoNCE_Loss:
 class Barlow_Twins_Loss:
     # Implements Barlow Twins loss as in https://arxiv.org/abs/2103.03230 and https://arxiv.org/abs/2205.11508
     # Also includes an optional loss modification as in https://arxiv.org/abs/2104.13712
+    # Should gather tensors across GPU for DDP?
 
     def __init__(self, symmetrizeLoss=False, btLam=0.005, btLossType='bt'):
         """
@@ -119,6 +120,8 @@ class Barlow_Twins_Loss:
 
 class VICReg_Loss:
     # Implements VICReg loss from https://arxiv.org/abs/2105.04906 and https://arxiv.org/abs/2205.11508
+    # Need to double-check this implementation - compare with official, which uses centered encodings and gathered tensors
+    # https://github.com/facebookresearch/vicreg
 
     def __init__(self, symmetrizeLoss, vicAlpha=25.0, vicBeta=25.0, vicGamma=1.0):
         """
@@ -207,7 +210,7 @@ class MEC_Loss:
 
 
 class MSE_Loss:
-    # Implements Maximum Entropy Coding loss as in https://arxiv.org/abs/2210.11464
+    # Implements
 
     def __init__(self, symmetrizeLoss):
         self.symmetrizeLoss = symmetrizeLoss
@@ -230,6 +233,7 @@ class MSE_Loss:
         totalLoss /= (i + 1)
 
         return totalLoss
+
 
 class DINO_CrossEnt:
     # Need to review this whole thing. It doesn't work. Are the batches supposed to be normalized?

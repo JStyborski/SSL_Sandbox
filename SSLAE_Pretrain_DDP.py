@@ -29,7 +29,8 @@ cudnn.benchmark = True
 parser = argparse.ArgumentParser()
 
 # Run processing parameters
-parser.add_argument('--multiprocDistrib', default=False, type=lambda x:bool(strtobool(x)), help='Strategy to launch on single/multiple GPU')
+parser.add_argument('--useDDP', default=False, type=lambda x:bool(strtobool(x)), help='Strategy to launch on single/multiple GPU')
+parser.add_argument('--gatherTensors', default=True, type=lambda x:bool(strtobool(x)), help='Collect tensors across multiple GPU for loss and backpropagation')
 parser.add_argument('--gpu', default=0, type=int, help='GPU ID to use for training (single GPU)')
 parser.add_argument('--nodeCount', default=1, type=int, help='Number of nodes/servers to use for distributed training')
 parser.add_argument('--nodeRank', default=0, type=int, help='Global rank of nodes/servers')
@@ -62,6 +63,7 @@ parser.add_argument('--runProbes', default=True, type=lambda x:bool(strtobool(x)
 # Model parameters
 parser.add_argument('--encArch', default='resnet18', type=str, help='Encoder network (backbone) type')
 parser.add_argument('--cifarMod', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply CIFAR modification to ResNets')
+parser.add_argument('--vitPPFreeze', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to freeze ViT patch projection for training stability')
 parser.add_argument('--prjHidDim', default=2048, type=int, help='Projector hidden dimension')
 parser.add_argument('--prjOutDim', default=2048, type=int, help='Projector output dimension')
 parser.add_argument('--prdDim', default=512, type=int, help='Predictor hidden dimension - set as 0 for no predictor')
@@ -102,8 +104,8 @@ parser.add_argument('--advRestarts', default=1, type=int, help='Number of PGD re
 # Misc Functions #
 ##################
 
-def save_chkpt(prefix, epoch, encArch, cifarMod, prjHidDim, prjOutDim, prdDim, prdAlpha, prdEps, prdBeta, momEncBeta, applySG, decArch, model, optimizer):
-    torch.save({'epoch': epoch, 'encArch': encArch, 'cifarMod': cifarMod, 'prjHidDim': prjHidDim, 'prjOutDim': prjOutDim,
+def save_chkpt(prefix, epoch, encArch, cifarMod, vitPPFreeze, prjHidDim, prjOutDim, prdDim, prdAlpha, prdEps, prdBeta, momEncBeta, applySG, decArch, model, optimizer):
+    torch.save({'epoch': epoch, 'encArch': encArch, 'cifarMod': cifarMod, 'vitPPFreeze': vitPPFreeze, 'prjHidDim': prjHidDim, 'prjOutDim': prjOutDim,
                 'prdDim': prdDim, 'prdAlpha': prdAlpha, 'prdEps': prdEps, 'prdBeta': prdBeta, 'momEncBeta': momEncBeta, 'applySG': applySG,
                 'decArch': decArch, 'stateDict': model.state_dict(), 'optimStateDict': optimizer.state_dict()},
                'Trained_Models/{}_pt_{:04d}.pth.tar'.format(prefix, epoch))
@@ -113,6 +115,23 @@ def gather_tensors(outLen, tens):
     torch.distributed.all_gather_into_tensor(outTens, tens)
     return outTens
 
+class FullGatherLayer(torch.autograd.Function):
+    """
+    Gather tensors from all process and support backward propagation for the gradients across processes.
+    """
+
+    @staticmethod
+    def forward(ctx, x):
+        output = [torch.zeros_like(x) for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather(output, x)
+        return tuple(output)
+
+    @staticmethod
+    def backward(ctx, *grads):
+        all_gradients = torch.stack(grads)
+        torch.distributed.all_reduce(all_gradients)
+        return all_gradients[torch.distributed.get_rank()]
+
 ###################
 # Setup Functions #
 ###################
@@ -121,10 +140,11 @@ def main():
 
     args = parser.parse_args()
 
-    args.trainRoot = r'D:/ImageNet-100/Poisoned/TAP_100/train'
-    args.ptPrefix = 'Clean'
-    args.batchSize = 64
-    args.nEpochs = 1
+    #args.trainRoot = r'D:/ImageNet-100/Poisoned/TAP_100/train'
+    #args.ptPrefix = 'Clean'
+    #args.batchSize = 32
+    #args.nEpochs = 1
+    #args.encArch = 'vit_small'
     #args.decArch = args.encArch
 
     if args.randSeed is not None:
@@ -136,17 +156,8 @@ def main():
                       'This will turn on the CUDNN deterministic setting, which can slow down your training'
                       'You may see unexpected behavior when restarting from checkpoints')
 
-    if not args.multiprocDistrib:
+    if not args.useDDP:
         warnings.warn('You have disabled DDP - the model will train on 1 GPU without data parallelism')
-
-    if args.multiprocDistrib and args.winceBeta > 0.0:
-        warnings.warn('InfoNCE loss is not suited for DDP training on multiple GPU')
-        # DDP splits data across multiple GPU and later averages the gradients across GPU
-        # This behavior gives an incorrect estimate of InfoNCE loss due to its reliance on negative pair similarities
-        # 1GPU: batch of 512 -> 2 augmented batches of 1024 -> each of 1024 samples has 1023 negatives
-        # 4GPU: batch of 512, split 128/GPU -> 4 * 2 augmented batches of 256 -> each of 256 samples has 255 negatives
-        # SimCLR disallows multi-GPU training entirely, only allowing parallelizing on TPUs
-        # CLIP accepts that the batch size is split across GPUs and doesn't call their loss "InfoNCE"
 
     if args.decArch is not None and any(args.useAdvList):
         warnings.warn('Adversarial SSL does not incorporate AE architecture - may get bugs or strange results')
@@ -161,7 +172,7 @@ def main():
     args.initLR = args.initLR * args.batchSize / 256
 
     # Launch multiple (or single) distributed processes for main_worker function - will automatically assign GPUs
-    if args.multiprocDistrib:
+    if args.useDDP:
         args.nProcPerNode = torch.cuda.device_count()
         args.nProcs = args.nProcPerNode * args.nodeCount
         torch.multiprocessing.spawn(main_worker, nprocs=args.nProcs, args=(args,))
@@ -180,7 +191,7 @@ def main_worker(gpu, args):
     print('- GPU {} online'.format(args.gpu))
 
     # Suppress printing if not master (gpu 0)
-    if args.multiprocDistrib and args.gpu != 0:
+    if args.useDDP and args.gpu != 0:
         def print_pass(*args):
             pass
         builtins.print = print_pass
@@ -189,7 +200,7 @@ def main_worker(gpu, args):
 
     # Set up distributed training on backend
     # For multiprocessing distributed training, rank needs to be the global rank among all the processes
-    if args.multiprocDistrib:
+    if args.useDDP:
         args.procRank = args.nodeRank * args.nProcPerNode + args.gpu
         torch.distributed.init_process_group(backend=args.distBackend, init_method=args.distURL, world_size=args.nProcs, rank=args.procRank)
         torch.distributed.barrier()
@@ -202,7 +213,7 @@ def main_worker(gpu, args):
             trainDataset = datasets.ImageFolder(args.trainRoot, CT.NTimesTransform_2Parts(args.nAugs, CT.t_randcrop(args.cropSize), CT.t_toPIL_pretrain()))
     else:
         trainDataset = CD.no_label_dataset(args.trainRoot, CT.NTimesTransform(args.nAugs, CT.t_pretrain(args.cropSize)))
-    if args.multiprocDistrib:
+    if args.useDDP:
         trainSampler = torch.utils.data.distributed.DistributedSampler(trainDataset)
         # When using single GPU per process and per DDP, need to divide batch size and workers based on nGPUs
         args.batchSize = int(args.batchSize / args.nProcs)
@@ -215,14 +226,14 @@ def main_worker(gpu, args):
                                                   num_workers=args.workers, pin_memory=True, sampler=trainSampler, drop_last=True)
 
     print('- Instantiating new model with {} backbone'.format(args.encArch))
-    model = SSLAE_Model.Base_Model(args.encArch, args.cifarMod, args.prjHidDim, args.prjOutDim, args.prdDim,
+    model = SSLAE_Model.Base_Model(args.encArch, args.cifarMod, args.vitPPFreeze, args.prjHidDim, args.prjOutDim, args.prdDim,
                                  args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, args.decArch)
 
     print('- Setting up model on single/multiple devices')
-    if args.multiprocDistrib:
+    if args.useDDP:
         # Convert BN to SyncBN
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        # For multiproc distributed, DDP constructor should set the single device scope - otherwises uses all available
+        # For multiprocess distributed, DDP constructor should set the single device scope - otherwises uses all available
         torch.cuda.set_device(args.gpu)
         model.cuda(args.gpu)
         # broadcast_buffers (default=True) lets SyncBN sync running mean and variance for BN
@@ -251,7 +262,7 @@ def main_worker(gpu, args):
 
     # Instantiate custom optimizer that skips momentum encoder and applies decay
     print('- Instantiating optimizer')
-    if args.multiprocDistrib:
+    if args.useDDP:
         optimParams = [{'params': model.module.encoder.parameters(), 'decayLR': args.decayEncLR},
                        {'params': model.module.projector.parameters(), 'decayLR': args.decayEncLR},
                        {'params': model.module.predictor.parameters(), 'decayLR': args.decayPrdLR}]
@@ -263,7 +274,10 @@ def main_worker(gpu, args):
                        {'params': model.predictor.parameters(), 'decayLR': args.decayPrdLR}]
         if args.decArch is not None:
             optimParams.append({'params': model.decoder.parameters(), 'decayLR': args.decayEncLR})
-    optimizer = torch.optim.SGD(params=optimParams, lr=args.initLR, momentum=args.momentum, weight_decay=args.weightDecay)
+    if 'vit' in args.encArch.lower():
+        optimizer = torch.optim.AdamW(params=optimParams, lr=args.initLR, weight_decay=args.weightDecay)
+    else:
+        optimizer = torch.optim.SGD(params=optimParams, lr=args.initLR, momentum=args.momentum, weight_decay=args.weightDecay)
     if args.useLARS:
         print("- Using LARS optimizer.")
         from Utils.Apex_LARC import LARC
@@ -287,7 +301,7 @@ def main_worker(gpu, args):
     # Initialize probes for training metrics, checkpoint initial model, and start timer
     if args.runProbes:
         probes = CP.Pretrain_Probes()
-    save_chkpt(args.ptPrefix, 0, args.encArch, args.cifarMod, args.prjHidDim, args.prjOutDim, args.prdDim,
+    save_chkpt(args.ptPrefix, 0, args.encArch, args.cifarMod, args.vitPPFreeze, args.prjHidDim, args.prjOutDim, args.prdDim,
               args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, args.decArch, model, optimizer)
     timeStart = time.time()
 
@@ -295,7 +309,7 @@ def main_worker(gpu, args):
     for epoch in range(args.startEpoch, args.nEpochs + 1):
 
         # Update sampler with current epoch - required to ensure shuffling works across devices
-        if args.multiprocDistrib:
+        if args.useDDP:
             trainSampler.set_epoch(epoch)
 
         # If using LR warmup, the warmup LR is linear, applies to all layers, and takes priority over decay
@@ -346,8 +360,18 @@ def main_worker(gpu, args):
             # Loop through each of the augs and create a list of results
             for augTens in augList:
 
-                # Get input tensor, push through model, and append to output list
+                # Get input tensor, push through model
                 p, z, r, mz, xd = model(augTens)
+
+                # Gather tensors across GPUs (required for accurate loss calculations)
+                if args.useDDP and args.nProcs > 1 and args.gatherTensors:
+                    p = torch.cat(FullGatherLayer.apply(p), dim=0)
+                    z = torch.cat(FullGatherLayer.apply(z), dim=0)
+                    r = torch.cat(FullGatherLayer.apply(r), dim=0)
+                    mz = torch.cat(FullGatherLayer.apply(mz), dim=0)
+                    xd = torch.cat(FullGatherLayer.apply(xd), dim=0) if args.decArch is not None else xd
+
+                # Append to lists for loss calculation
                 outList.append([p, z, r, mz])
                 recList.append(xd)
 
@@ -368,7 +392,7 @@ def main_worker(gpu, args):
 
             # Update momentum encoder
             if args.momEncBeta > 0.0:
-                if args.multiprocDistrib:
+                if args.useDDP:
                     model.module.update_momentum_network()
                 else:
                     model.update_momentum_network()
@@ -387,20 +411,12 @@ def main_worker(gpu, args):
             # Ensures that BN and momentum BN running stats don't update
             model.eval()
 
-            # If data was split out for DDP, then combine output tensors for analysis
-            if args.multiprocDistrib and args.nProcs > 1:
-                outLen = args.batchSize * args.nProcs
-                p1 = gather_tensors(outLen, outList[0][0].detach())
-                z1 = gather_tensors(outLen, outList[0][1].detach())
-                r1 = gather_tensors(outLen, outList[0][2].detach())
-                r2 = gather_tensors(outLen, outList[1][2].detach())
-                mz2 = gather_tensors(outLen, outList[1][3].detach())
-            else:
-                p1 = outList[0][0].detach()
-                z1 = outList[0][1].detach()
-                r1 = outList[0][2].detach()
-                r2 = outList[1][2].detach()
-                mz2 = outList[1][3].detach()
+            # Define inputs for metric probes
+            p1 = outList[0][0].detach().contiguous()
+            z1 = outList[0][1].detach().contiguous()
+            r1 = outList[0][2].detach().contiguous()
+            r2 = outList[1][2].detach().contiguous()
+            mz2 = outList[1][3].detach().contiguous()
 
             # Note that p1, z1, and mz2 are L2 normd, as SimSiam, BYOL, InfoNCE, and MEC use L2 normalized encodings
             # This is taken care of in loss functions, but I have to do it explicitly here
@@ -413,12 +429,12 @@ def main_worker(gpu, args):
 
         # Checkpoint model
         if epoch in [1, 10] or (epoch <= 200 and epoch % 20 == 0) or (epoch > 200 and epoch % 50 == 0):
-            save_chkpt(args.ptPrefix, epoch, args.encArch, args.cifarMod, args.prjHidDim, args.prjOutDim,
+            save_chkpt(args.ptPrefix, epoch, args.encArch, args.cifarMod, args.vitPPFreeze, args.prjHidDim, args.prjOutDim,
                        args.prdDim, args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG, args.decArch, model, optimizer)
 
     # Postprocessing and outputs
 
-    if args.runProbes and (args.gpu == 0 or not args.multiprocDistrib):
+    if args.runProbes and (args.gpu == 0 or not args.useDDP):
 
         #probes.plot_probes()
 

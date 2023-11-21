@@ -26,7 +26,7 @@ cudnn.benchmark = True
 parser = argparse.ArgumentParser()
 
 # Run processing parameters
-parser.add_argument('--multiprocDistrib', default=False, type=lambda x:bool(strtobool(x)), help='Strategy to launch on single/multiple GPU')
+parser.add_argument('--useDDP', default=False, type=lambda x:bool(strtobool(x)), help='Strategy to launch on single/multiple GPU')
 parser.add_argument('--gpu', default=0, type=int, help='GPU ID to use for training (single GPU)')
 parser.add_argument('--nodeCount', default=1, type=int, help='Number of nodes/servers to use for distributed training')
 parser.add_argument('--nodeRank', default=0, type=int, help='Global rank of nodes/servers')
@@ -102,7 +102,7 @@ def main():
                       'This will turn on the CUDNN deterministic setting, which can slow down your training'
                       'You may see unexpected behavior when restarting from checkpoints')
 
-    if not args.multiprocDistrib:
+    if not args.useDDP:
         warnings.warn('You have disabled DDP - the model will train on 1 GPU without data parallelism')
 
     if args.ptFile == '':
@@ -117,7 +117,7 @@ def main():
     args.initLR = args.initLR * args.batchSize / 256
 
     # Launch multiple (or single) distributed processes for main_worker function - will automatically assign GPUs
-    if args.multiprocDistrib:
+    if args.useDDP:
         args.nProcPerNode = torch.cuda.device_count()
         args.nProcs = args.nProcPerNode * args.nodeCount
         torch.multiprocessing.spawn(main_worker, nprocs=args.nProcs, args=(args,))
@@ -137,7 +137,7 @@ def main_worker(gpu, args):
     print('GPU {} online'.format(args.gpu))
 
     # Suppress printing if not master (gpu 0)
-    if args.multiprocDistrib and args.gpu != 0:
+    if args.useDDP and args.gpu != 0:
         def print_pass(*args):
             pass
         builtins.print = print_pass
@@ -146,14 +146,14 @@ def main_worker(gpu, args):
 
     # Set up distributed training on backend
     # For multiprocessing distributed training, rank needs to be the global rank among all the processes
-    if args.multiprocDistrib:
+    if args.useDDP:
         args.procRank = args.nodeRank * args.nProcPerNode + args.gpu
         torch.distributed.init_process_group(backend=args.distBackend, init_method=args.distURL, world_size=args.nProcs, rank=args.procRank)
         torch.distributed.barrier()
 
     print('Defining dataset and loader')
     trainDataset = datasets.ImageFolder(args.trainRoot, CT.NTimesTransform(args.nAugs, CT.t_finetune(args.cropSize)))
-    if args.multiprocDistrib:
+    if args.useDDP:
         trainSampler = torch.utils.data.distributed.DistributedSampler(trainDataset)
         # When using single GPU per process and per DDP, need to divide batch size and workers based on nGPUs
         args.batchSize = int(args.batchSize / args.nProcs)
@@ -181,8 +181,8 @@ def main_worker(gpu, args):
         stateDict = torch.load(stateFile, map_location='cuda:{}'.format(args.gpu))
 
         print('- Instantiating new model with {} backbone'.format(stateDict['encArch']))
-        model = SSLAE_Model.Base_Model(stateDict['encArch'], stateDict['cifarMod'], stateDict['prjHidDim'], stateDict['prjOutDim'],
-                                       stateDict['prdDim'], None, 0.3, 0.5, 0.0, True, None)
+        model = SSLAE_Model.Base_Model(stateDict['encArch'], stateDict['cifarMod'], stateDict['vitPPFreeze'], stateDict['prjHidDim'],
+                                       stateDict['prjOutDim'], stateDict['prdDim'], None, 0.3, 0.5, 0.0, True, None)
 
         # If a stateDict key has "module" in (from running parallel), create a new dictionary with the right names
         for key in list(stateDict['stateDict'].keys()):
@@ -203,7 +203,7 @@ def main_worker(gpu, args):
         model.predictor = nn.Linear(encDim, args.nClasses)
 
         print('- Setting up model on single/multiple devices')
-        if args.multiprocDistrib:
+        if args.useDDP:
             # Convert BN to SyncBN
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
             # For multiproc distributed, DDP constructor should set the single device scope - otherwises uses all available
@@ -226,7 +226,7 @@ def main_worker(gpu, args):
 
         print('- Instantiating loss and optimizer')
         crossEnt = nn.CrossEntropyLoss()
-        if args.multiprocDistrib:
+        if args.useDDP:
             optimizer = torch.optim.SGD(params=model.module.parameters(), lr=args.initLR, momentum=args.momentum, weight_decay=args.weightDecay)
         else:
             optimizer = torch.optim.SGD(params=model.parameters(), lr=args.initLR, momentum=args.momentum, weight_decay=args.weightDecay)
@@ -242,7 +242,7 @@ def main_worker(gpu, args):
         for epoch in range(1, args.nEpochs + 1):
 
             # Update sampler with current epoch - required to ensure shuffling works across devices
-            if args.multiprocDistrib:
+            if args.useDDP:
                 trainSampler.set_epoch(epoch)
 
             # If desired, adjust learning rate for the current epoch

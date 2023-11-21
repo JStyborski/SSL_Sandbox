@@ -2,26 +2,13 @@ import copy
 import torch
 from torch import nn
 import torchvision.models as models
+from timm.models.vision_transformer import _create_vision_transformer
 
 import Utils.ResNet_AutoEncoder as RNAE
 
-# Function to reinitialize all resettable weights of a given model
-def reset_model_weights(layer):
-    if hasattr(layer, 'reset_parameters'):
-        layer.reset_parameters()
-    elif hasattr(layer, 'children'):
-        for child in layer.children():
-            reset_model_weights(child)
-
-# Function to hook intermediate network outputs
-activation = {}
-def get_activation(name):
-    def hook(model, input, output):
-        activation[name] = output
-    return hook
 
 class Base_Model(nn.Module):
-    def __init__(self, encArch=None, cifarMod=False, prjHidDim=2048, prjOutDim=2048, prdDim=512,
+    def __init__(self, encArch=None, cifarMod=False, vitPPFreeze=True, prjHidDim=2048, prjOutDim=2048, prdDim=512,
                  prdAlpha=None, prdEps=0.3, prdBeta=0.5, momEncBeta=0, applySG=True, decArch=None):
         super(Base_Model, self).__init__()
         self.prdAlpha = prdAlpha
@@ -32,13 +19,20 @@ class Base_Model(nn.Module):
         self.applySG = applySG
         self.decArch = decArch
 
-        self.encoder = models.__dict__[encArch](zero_init_residual=True)
-        self.encoder.fc = nn.Identity()
-
-        # CIFAR ResNet mod
-        if 'resnet' in encArch and cifarMod:
-            self.encoder.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=2, bias=False)
-            self.encoder.maxpool = nn.Identity()
+        if 'resnet' in encArch.lower():
+            # Use TorchVision ResNets
+            self.encoder = models.__dict__[encArch](zero_init_residual=True)
+            self.encoder.fc = nn.Identity()
+            if cifarMod:
+                # ResNet mod for CIFAR images
+                self.encoder.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=2, bias=False)
+                self.encoder.maxpool = nn.Identity()
+        elif 'vit' in encArch.lower():
+            self.encoder = timm_vit(encArch)
+            if vitPPFreeze:
+                # Apply patch projector freeze as in https://arxiv.org/abs/2104.02057
+                self.encoder.patch_embed.proj.weight.requires_grad = False
+                self.encoder.patch_embed.proj.bias.requires_grad = False
 
         # Get encoding dimension
         encDim = self.encoder.inplanes if 'resnet' in encArch else self.encoder.num_features
@@ -79,7 +73,8 @@ class Base_Model(nn.Module):
         if self.decArch is not None:
 
             # Register a hook to get the output before the adaptive average pool (ResNet decoder expects 512x7x7 size "encodings")
-            self.encoder.layer4.register_forward_hook(get_activation('layer4'))
+            if 'resnet' in encArch.lower():
+                self.encoder.layer4.register_forward_hook(get_activation('layer4'))
 
             # Find decoder config and instantiate
             configs, bottleneck = RNAE.get_configs(encArch)
@@ -162,3 +157,35 @@ class Base_Model(nn.Module):
                 mom_enc_params.data = self.momEncBeta * mom_enc_params.data + (1 - self.momEncBeta) * enc_params.data
             for prj_params, mom_prj_params in zip(self.projector.parameters(), self.momentum_projector.parameters()):
                 mom_prj_params.data = self.momEncBeta * mom_prj_params.data + (1 - self.momEncBeta) * prj_params.data
+
+
+# Function to reinitialize all resettable weights of a given model
+def reset_model_weights(layer):
+    if hasattr(layer, 'reset_parameters'):
+        layer.reset_parameters()
+    elif hasattr(layer, 'children'):
+        for child in layer.children():
+            reset_model_weights(child)
+
+# Function to hook intermediate network outputs
+activation = {}
+def get_activation(name):
+    def hook(model, input, output):
+        activation[name] = output
+    return hook
+
+# Function to define ViT architectures from the TIMM library
+def timm_vit(arch, patch_size=16, **kwargs):
+    if 'tiny' in arch.lower():
+        model_kwargs = dict(patch_size=patch_size, embed_dim=192, depth=12, num_heads=3, num_classes=0, **kwargs)
+        model = _create_vision_transformer("vit_tiny_patch16_224", pretrained=False, **model_kwargs)
+    elif 'small' in arch.lower():
+        model_kwargs = dict(patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, num_classes=0, **kwargs)
+        model = _create_vision_transformer("vit_small_patch16_224", pretrained=False, **model_kwargs)
+    elif 'base' in arch.lower():
+        model_kwargs = dict(patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, num_classes=0, **kwargs)
+        model = _create_vision_transformer("vit_base_patch16_224", pretrained=False, **model_kwargs)
+    elif 'large' in arch.lower():
+        model_kwargs = dict(patch_size=patch_size, embed_dim=1024, depth=24, num_heads=16, num_classes=0, **kwargs)
+        model = _create_vision_transformer("vit_large_patch16_224", pretrained=False, **model_kwargs)
+    return model
