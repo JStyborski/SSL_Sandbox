@@ -19,6 +19,33 @@ def t_pretrain(cropSize):
     ])
     return t
 
+def t_cropflip(cropSize):
+    t = transforms.Compose([
+        transforms.RandomResizedCrop(cropSize, scale=(0.2, 1.)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+    ])
+    return t
+
+def t_toPIL_highfilt():
+    t = transforms.Compose([
+        transforms.ToPILImage(),
+        HighPassFilter(sigma=[3., 3.]),
+        transforms.ToTensor()
+    ])
+    return t
+
+def t_toPIL_pretrain():
+    t = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+        transforms.RandomGrayscale(p=0.2),
+        transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    return t
+
 def t_finetune(cropSize):
     t = transforms.Compose([
         transforms.RandomResizedCrop(cropSize),
@@ -122,3 +149,18 @@ class NTimesTransform:
         tList = [self.base_transform(x) for _ in range(self.n_views)]
         return tList
 
+
+class NTimesTransform_2Parts:
+    """Take n random crops of one image as the query and key."""
+
+    def __init__(self, n_views, base_transform, rec_transform, aug_transform):
+        self.n_views = n_views
+        self.base_transform = base_transform
+        self.rec_transform = rec_transform
+        self.aug_transform = aug_transform
+
+    def __call__(self, x):
+        mList = [self.base_transform(x) for _ in range(self.n_views)]
+        rList = [self.rec_transform(base) for base in mList]
+        aList = [self.aug_transform(base) for base in mList]
+        return rList, aList

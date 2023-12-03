@@ -8,7 +8,7 @@ from torch import nn
 import torchvision.datasets as datasets
 
 import Utils.Custom_Transforms as CT
-import SSLAE_Model
+import SSL_Model
 
 ###############
 # User Inputs #

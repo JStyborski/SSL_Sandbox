@@ -4,12 +4,10 @@ from torch import nn
 import torchvision.models as models
 from timm.models.vision_transformer import _create_vision_transformer
 
-import Utils.ResNet_AutoEncoder as RNAE
-
 
 class Base_Model(nn.Module):
-    def __init__(self, encArch=None, cifarMod=False, vitPPFreeze=True, prjHidDim=2048, prjOutDim=2048, prdDim=512,
-                 prdAlpha=None, prdEps=0.3, prdBeta=0.5, momEncBeta=0, applySG=True, decArch=None):
+    def __init__(self, encArch=None, cifarMod=False, vitPPFreeze=True, prjArch='moco', prjHidDim=2048, prjBotDim=256, prjOutDim=2048, prdHidDim=512,
+                 prdAlpha=None, prdEps=0.3, prdBeta=0.5, momEncBeta=0, applySG=True):
         super(Base_Model, self).__init__()
         self.prdAlpha = prdAlpha
         self.prdEps = prdEps
@@ -17,7 +15,6 @@ class Base_Model(nn.Module):
         self.momZCor = None  # Initialize momentum correlation matrix as None (overwritten later)
         self.momEncBeta = momEncBeta
         self.applySG = applySG
-        self.decArch = decArch
 
         if 'resnet' in encArch.lower():
             # Use TorchVision ResNets
@@ -37,23 +34,14 @@ class Base_Model(nn.Module):
         # Get encoding dimension
         encDim = self.encoder.inplanes if 'resnet' in encArch else self.encoder.num_features
 
-        self.projector = nn.Sequential(
-            nn.Linear(encDim, prjHidDim, bias=False),
-            nn.BatchNorm1d(prjHidDim),
-            nn.ReLU(inplace=True),
-            nn.Linear(prjHidDim, prjHidDim, bias=False),
-            nn.BatchNorm1d(prjHidDim),
-            nn.ReLU(inplace=True),
-            nn.Linear(prjHidDim, prjOutDim, bias=False),
-            nn.BatchNorm1d(prjOutDim, affine=False)
-        )
+        self.projector = build_proj(prjArch, encDim, prjHidDim, prjBotDim, prjOutDim)
 
-        if prdDim > 0 and self.prdAlpha is None:
+        if prdHidDim > 0 and self.prdAlpha is None:
             self.predictor = nn.Sequential(
-                nn.Linear(prjOutDim, prdDim, bias=False),
-                nn.BatchNorm1d(prdDim),
+                nn.Linear(prjOutDim, prdHidDim, bias=False),
+                nn.BatchNorm1d(prdHidDim),
                 nn.ReLU(inplace=True),
-                nn.Linear(prdDim, prjOutDim, bias=True),
+                nn.Linear(prdHidDim, prjOutDim, bias=True)
             )
         else:
             self.predictor = nn.Identity(prjOutDim)
@@ -69,16 +57,6 @@ class Base_Model(nn.Module):
             self.momentum_projector = copy.deepcopy(self.projector)
             self.momentum_projector.apply(fn=reset_model_weights)
             for param in self.momentum_projector.parameters(): param.requires_grad = False
-
-        if self.decArch is not None:
-
-            # Register a hook to get the output before the adaptive average pool (ResNet decoder expects 512x7x7 size "encodings")
-            if 'resnet' in encArch.lower():
-                self.encoder.layer4.register_forward_hook(get_activation('layer4'))
-
-            # Find decoder config and instantiate
-            configs, bottleneck = RNAE.get_configs(encArch)
-            self.decoder = RNAE.ResNetDecoder(configs, bottleneck)
 
     def forward(self, x):
         """
@@ -110,14 +88,7 @@ class Base_Model(nn.Module):
         if self.applySG:
             mz = mz.detach()
 
-        # Get decoder input and push through decoder
-        if self.decArch is not None:
-            r_pre = activation['layer4']
-            xd = self.decoder(r_pre)
-        else:
-            xd = None
-
-        return p, z, r, mz, xd
+        return p, z, r, mz
 
     def calculate_optimal_predictor(self, z):
         """
@@ -167,13 +138,6 @@ def reset_model_weights(layer):
         for child in layer.children():
             reset_model_weights(child)
 
-# Function to hook intermediate network outputs
-activation = {}
-def get_activation(name):
-    def hook(model, input, output):
-        activation[name] = output
-    return hook
-
 # Function to define ViT architectures from the TIMM library
 def timm_vit(arch, patch_size=16, **kwargs):
     if 'tiny' in arch.lower():
@@ -189,3 +153,91 @@ def timm_vit(arch, patch_size=16, **kwargs):
         model_kwargs = dict(patch_size=patch_size, embed_dim=1024, depth=24, num_heads=16, num_classes=0, **kwargs)
         model = _create_vision_transformer("vit_large_patch16_224", pretrained=False, **model_kwargs)
     return model
+
+
+class L2_Norm_Layer(nn.Module):
+
+    def __init__(self, dim=1, eps=1e-12):
+        super(L2_Norm_Layer, self).__init__()
+        self.dim = dim
+        self.eps = eps
+
+    def forward(self, x):
+        return nn.functional.normalize(x, p=2, dim=self.dim, eps=self.eps)
+
+
+def build_proj(arch, encDim, prjHidDim, prjBotDim, prjOutDim):
+
+    if arch == 'simsiam' or arch == 'simclr' or arch == 'mec':
+        proj = nn.Sequential(
+            nn.Linear(encDim, encDim, bias=False),
+            nn.BatchNorm1d(encDim),
+            nn.ReLU(inplace=True),
+            nn.Linear(encDim, encDim, bias=False),
+            nn.BatchNorm1d(encDim),
+            nn.ReLU(inplace=True),
+            nn.Linear(encDim, prjOutDim, bias=False),
+            nn.BatchNorm1d(prjOutDim, affine=False)
+        )
+
+    if arch == 'moco':
+        proj = nn.Sequential(
+            nn.Linear(encDim, prjHidDim, bias=False),
+            nn.BatchNorm1d(prjHidDim),
+            nn.ReLU(inplace=True),
+            nn.Linear(prjHidDim, prjHidDim, bias=False),
+            nn.BatchNorm1d(prjHidDim),
+            nn.ReLU(inplace=True),
+            nn.Linear(prjHidDim, prjOutDim, bias=False),
+            nn.BatchNorm1d(prjOutDim, affine=False)
+        )
+
+    elif arch == 'byol':
+        proj = nn.Sequential(
+            nn.Linear(encDim, prjHidDim, bias=False),
+            nn.BatchNorm1d(prjHidDim),
+            nn.ReLU(inplace=True),
+            nn.Linear(prjHidDim, prjOutDim, bias=False),
+        )
+
+    elif arch == 'barlow_twins' or arch == 'vicreg':
+        proj = nn.Sequential(
+            nn.Linear(encDim, prjHidDim, bias=False),
+            nn.BatchNorm1d(prjHidDim),
+            nn.ReLU(inplace=True),
+            nn.Linear(prjHidDim, prjHidDim, bias=False),
+            nn.BatchNorm1d(prjHidDim),
+            nn.ReLU(inplace=True),
+            nn.Linear(prjHidDim, prjOutDim, bias=False),
+        )
+
+    elif arch == 'dino_cnn':
+        botNeckDim = 256  # Temporary hack: DINO ViT uses an extra bottleneck layer, and I don't have a variable setup yet
+        proj = nn.Sequential(
+            nn.Linear(encDim, prjHidDim, bias=True),
+            nn.BatchNorm1d(prjHidDim),
+            nn.GELU(),
+            nn.Linear(prjHidDim, prjHidDim, bias=True),
+            nn.BatchNorm1d(prjHidDim),
+            nn.GELU(),
+            nn.Linear(prjHidDim, botNeckDim, bias=True),
+            L2_Norm_Layer(dim=1),
+            nn.utils.weight_norm(nn.Linear(botNeckDim, prjOutDim, bias=False))
+        )
+        proj[-1].weight_g.data.fill_(1.)
+        proj[-1].weight_g.requires_grad = False
+
+    elif arch == 'dino_vit':
+        proj = nn.Sequential(
+            nn.Linear(encDim, prjHidDim, bias=True),
+            nn.GELU(),
+            nn.Linear(prjHidDim, prjHidDim, bias=True),
+            nn.GELU(),
+            nn.Linear(prjHidDim, prjBotDim, bias=True),
+            L2_Norm_Layer(dim=1),
+            nn.utils.weight_norm(nn.Linear(prjBotDim, prjOutDim, bias=False))
+        )
+        proj[-1].weight_g.data.fill_(1.)
+        proj[-1].weight_g.requires_grad = False
+
+    return proj

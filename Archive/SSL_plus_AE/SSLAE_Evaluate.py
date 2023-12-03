@@ -16,11 +16,11 @@ from Adversarial import FGSM_PGD, Local_Lip
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Load data
-trainRoot = r'D:/ImageNet-100/Poisoned/TAP_100/train'
+trainRoot = r'D:/ImageNet-100/train'
 testRoot = r'D:/ImageNet-100/val'
 
 # Find pretrained models
-dirName = 'Saved_Models/ImageNet-100/SSL_ViT_Tiny/TAP'
+dirName = 'Trained_Models'
 fileList = os.listdir(dirName)
 ptList = sorted([dirName + '/' + stateFile for stateFile in fileList
                  if ('_pt_' in stateFile and '_lp_' not in stateFile and '_ft_' not in stateFile)])
@@ -41,7 +41,7 @@ knnBankBatches = repBankBatches
 knnTestBatches = 5
 k = 20
 
-evalFinetune = False
+evalFinetune = True
 
 # LinCls parameters
 trainAccBatches = 1e6
@@ -50,11 +50,13 @@ testAccBatches = 1e6
 # Adversarial parameters
 atkSamples = 1024
 atkBatchSize = 32
-advAlpha = 1/255
-advEps = 8/255
+advAlpha = 0.6/255
+advEps = 4/255
 advRestarts = 5
 advSteps = 10
 randInit = True
+x_min = None # 0.
+x_max = None # 1.
 
 ##############
 # Data Setup #
@@ -194,7 +196,7 @@ def adv_attack(loader, model, lossfn):
 
     # Attack batch of images with FGSM or PGD and calculate accuracy
     avgAdvLoss, advTens = FGSM_PGD.sl_pgd(model, lossfn, augTens, truthTens, advAlpha, advEps, np.inf, advRestarts,
-                                          advSteps, atkBatchSize, 0, False, randInit)
+                                          advSteps, atkBatchSize, 0, False, randInit, None, x_min, x_max)
     advAcc = torch.sum(torch.argmax(model(advTens)[0].detach(), dim=1) == truthTens).cpu().numpy() / advTens.size(0)
 
     return advAcc
@@ -214,8 +216,9 @@ for stateFile in ptList:
     ptStateDict = torch.load(stateFile, map_location='cuda:{}'.format(0))
 
     # Create model and load model weights
-    model = SSLAE_Model.Base_Model(ptStateDict['encArch'], ptStateDict['cifarMod'], ptStateDict['vitPPFreeze'], ptStateDict['prjHidDim'],
-                                   ptStateDict['prjOutDim'], ptStateDict['prdDim'], None, 0.3, 0.5, 0.0, True, None)
+    model = SSLAE_Model.Base_Model(ptStateDict['encArch'], ptStateDict['rnCifarMod'], ptStateDict['vitPPFreeze'], ptStateDict['prjArch'],
+                                   ptStateDict['prjHidDim'], ptStateDict['prjBotDim'], ptStateDict['prjOutDim'], ptStateDict['prdHidDim'],
+                                   None, 0.3, 0.5, 0.0, True, None)
 
     # If a stateDict key has "module" in (from running parallel), create a new dictionary with the right names
     for key in list(ptStateDict['stateDict'].keys()):
@@ -224,7 +227,7 @@ for stateFile in ptList:
             del ptStateDict['stateDict'][key]
 
     # Load weights
-    model.load_state_dict(ptStateDict['stateDict'], strict=False)
+    model.load_state_dict(ptStateDict['stateDict'], strict=True)
 
     # Replace the projector with identity and the predictor with linear classifier
     encDim = model.encoder.inplanes if 'resnet' in ptStateDict['encArch'] else model.encoder.num_features

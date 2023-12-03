@@ -297,7 +297,7 @@ def ssl_pgd(model, lossFn, inpList, useAdvList, gatherTensors, alpha, eps, norm,
                         advList[i].requires_grad = True
 
                     # Calculate outputs and append
-                    pAdv, _, _, mzAdv = model(advList[i])
+                    pAdv, _, _, mzAdv, _ = model(advList[i])
                     if gatherTensors:
                         pAdv = torch.cat(MF.FullGatherLayer.apply(pAdv.contiguous()), dim=0)
                         mzAdv = torch.cat(MF.FullGatherLayer.apply(mzAdv.contiguous()), dim=0)

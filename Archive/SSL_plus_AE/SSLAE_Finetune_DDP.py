@@ -47,6 +47,7 @@ parser.add_argument('--nAugs', default=1, type=int, help='Number of augmentation
 # Training parameters
 parser.add_argument('--nEpochs', default=100, type=int, help='Number of epochs to run')
 parser.add_argument('--batchSize', default=512, type=int, help='Data loader batch size')
+parser.add_argument('--nBatches', default=1e10, type=int, help='Maximum number of batches to run per epoch')
 parser.add_argument('--momentum', default=0.9, type=float, help='SGD momentum value')
 parser.add_argument('--weightDecay', default=0, type=float, help='SGD weight decay value')
 parser.add_argument('--initLR', default=5.0, type=float, help='SGD initial learning rate')
@@ -58,18 +59,16 @@ parser.add_argument('--decayFactor', default=0.2, type=float, help='Factor by wh
 # Adversarial training parameters
 parser.add_argument('--useAdv', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply adversarial training')
 parser.add_argument('--keepStd', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to train with the adversarial plus original images - increases batch size')
-parser.add_argument('--advBatchSize', default=512, type=int, help='Batch size to use for adversarial training loader')
 parser.add_argument('--advAlpha', default=1/255, type=float, help='PGD step size')
 parser.add_argument('--advEps', default=8/255, type=float, help='PGD attack radius limit, measured in specified norm')
 parser.add_argument('--advNorm', default=float('inf'), type=float, help='Norm type for measuring perturbation radius')
-parser.add_argument('--advSteps', default=10, type=int, help='Number of PGD steps to take')
-parser.add_argument('--advNoise', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to use random initialization')
 parser.add_argument('--advRestarts', default=1, type=int, help='Number of PGD restarts to search for best attack')
-
-#batchSize = 256 # 256 for CIFAR, 4096 for IN1k
-#initLR = 30 # 30 for CIFAR LP, 0.1 for CIFAR FT and IN1k LP
-#decayLR = 'stepdn' # None,'stepdn' (CIFAR LP), 'cosdn' (CIFAR FT and IN1k LP)
-#decaySteps = [60, 80] # Epochs at which to cut LR - only used with 'stepdn' decay
+parser.add_argument('--advSteps', default=10, type=int, help='Number of PGD steps to take')
+parser.add_argument('--advBatchSize', default=512, type=int, help='Batch size to use for adversarial training loader')
+parser.add_argument('--advNoise', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to use random initialization')
+parser.add_argument('--advNoiseMag', default=None, type=float, help='Magnitude of noise to add to random start attack')
+parser.add_argument('--advClipMin', default=None, type=int, help='Minimium value to clip adversarial inputs')
+parser.add_argument('--advClipMax', default=None, type=int, help='Maximum value to clip adversarial inputs')
 
 ###################
 # Setup Functions #
@@ -81,18 +80,22 @@ def main():
 
     # HY Adversarial Training Overwrites
     #args.ptDir = 'Trained_Models'
-    #args.trainRoot = r'D:/ImageNet-100/Poisoned/RUE_100'
-    #args.ftPrefix = 'RUE'
+    #args.trainRoot = r'D:/ImageNet-100/Poisoned/CUDA_100/train'
+    #args.ftPrefix = 'CUDA'
     #args.ftType = 'ft'
     #args.batchSize = 128
     #args.weightDecay = 0.0005
     #args.initLR = 0.2
+    #args.decayLR = 'cosdn'
     #args.decaySteps = [40, 80]
     #args.decayFactor = 0.1
     #args.useAdv = True
     #args.advBatchSize = 128
     #args.advAlpha = 0.6/255
     #args.advEps = 4/255
+    #args.advNoise = True
+    #args.advClipMin = 0.0
+    #args.advClipMax = 1.0
 
     if args.randSeed is not None:
         random.seed(args.randSeed)
@@ -181,8 +184,9 @@ def main_worker(gpu, args):
         stateDict = torch.load(stateFile, map_location='cuda:{}'.format(args.gpu))
 
         print('- Instantiating new model with {} backbone'.format(stateDict['encArch']))
-        model = SSLAE_Model.Base_Model(stateDict['encArch'], stateDict['cifarMod'], stateDict['vitPPFreeze'], stateDict['prjHidDim'],
-                                       stateDict['prjOutDim'], stateDict['prdDim'], None, 0.3, 0.5, 0.0, True, None)
+        model = SSLAE_Model.Base_Model(stateDict['encArch'], stateDict['rnCifarMod'], stateDict['vitPPFreeze'], stateDict['prjArch'],
+                                       stateDict['prjHidDim'], stateDict['prjBotDim'], stateDict['prjOutDim'], stateDict['prdHidDim'],
+                                       None, 0.3, 0.5, 0.0, True, None)
 
         # If a stateDict key has "module" in (from running parallel), create a new dictionary with the right names
         for key in list(stateDict['stateDict'].keys()):
@@ -226,7 +230,11 @@ def main_worker(gpu, args):
 
         print('- Instantiating loss and optimizer')
         crossEnt = nn.CrossEntropyLoss()
-        if args.useDDP:
+        if 'vit' in stateDict['encArch'].lower() and args.useDDP:
+            optimizer = torch.optim.AdamW(params=model.module.parameters(), lr=args.initLR, weight_decay=args.weightDecay)
+        elif 'vit' in stateDict['encArch'].lower():
+            optimizer = torch.optim.AdamW(params=model.parameters(), lr=args.initLR, weight_decay=args.weightDecay)
+        elif args.useDDP:
             optimizer = torch.optim.SGD(params=model.module.parameters(), lr=args.initLR, momentum=args.momentum, weight_decay=args.weightDecay)
         else:
             optimizer = torch.optim.SGD(params=model.parameters(), lr=args.initLR, momentum=args.momentum, weight_decay=args.weightDecay)
@@ -275,9 +283,9 @@ def main_worker(gpu, args):
 
                     # Calculate (untargeted) adversarial samples from inputs and use for training
                     if args.useAdv:
-                        _, advTens = FGSM_PGD.sl_pgd(model, nn.CrossEntropyLoss(reduction='none'), augTens, truthTens,
-                                                        args.advAlpha, args.advEps, args.advNorm, args.advRestarts, args.advSteps,
-                                                        args.advBatchSize, outIdx=0, targeted=False, rand_init=args.advNoise)
+                        _, advTens = FGSM_PGD.sl_pgd(model, nn.CrossEntropyLoss(reduction='none'), augTens, truthTens, args.advAlpha, args.advEps,
+                                                     args.advNorm, args.advRestarts, args.advSteps, args.advBatchSize, outIdx=0, targeted=False,
+                                                     randInit=args.advNoise, noiseMag=args.advNoiseMag, xMin=args.advClipMin, xMax=args.advClipMax)
                         if args.keepStd:
                             augTens = torch.cat((augTens, advTens.detach()), dim=0).cuda(args.gpu, non_blocking=True)
                         else:
@@ -302,6 +310,9 @@ def main_worker(gpu, args):
                 sumLossVal += lossVal.detach().cpu().numpy()
                 nTrainCorrect += torch.sum(torch.argmax(p.detach(), dim=1) == truthTens).cpu().numpy()
                 nTrainTotal += len(truthTens)
+
+                if batchI + 1 >= args.nBatches:
+                    break
 
             avgLossVal = sumLossVal / (batchI + 1)
             clnTrainAcc = nTrainCorrect / nTrainTotal
