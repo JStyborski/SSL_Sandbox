@@ -80,8 +80,8 @@ def main():
 
     # HY Adversarial Training Overwrites
     #args.ptDir = 'Trained_Models'
-    #args.trainRoot = r'D:/ImageNet-100/Poisoned/CUDA_100/train'
-    #args.ftPrefix = 'CUDA'
+    #args.trainRoot = r'../Datasets/Poisoned_ImageNet/RUE_100/train'
+    #args.ftPrefix = 'RUE'
     #args.ftType = 'ft'
     #args.batchSize = 128
     #args.weightDecay = 0.0005

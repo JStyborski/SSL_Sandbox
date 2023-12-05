@@ -95,7 +95,7 @@ parser.add_argument('--dinoTauS', default=0.1, type=float, help='Temperature for
 parser.add_argument('--dinoTauT', default=0.05, type=float, help='Temperature for teacher network (target) softmax')
 
 # Adversarial training parameters
-parser.add_argument('--useAdvList', default=[False, False], type=list, help='List of Booleans to apply adversarial training for each view')
+parser.add_argument('--useAdvList', default=[False, False], nargs='+', type=lambda x:bool(strtobool(x)), help='List of Booleans to apply adversarial training for each view')
 parser.add_argument('--keepStd', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to train with the adversarial plus original images - increases batch size')
 parser.add_argument('--advAlpha', default=1/255, type=float, help='PGD step size')
 parser.add_argument('--advEps', default=8/255, type=float, help='PGD attack radius limit, measured in specified norm')
@@ -133,7 +133,6 @@ def main():
     #args.prdDim = 0
     #args.nEpochs = 1
     #args.encArch = 'vit_small'
-    #args.useAdvList = [True, False]
 
     if args.randSeed is not None:
         random.seed(args.randSeed)
@@ -157,13 +156,14 @@ def main():
     # Infer learning rate
     args.initLR = args.initLR * args.batchSize / 256
 
-    # Overwrite gather tensors given DDP conditions
-    args.gatherTensors = args.useDDP and args.nProcs > 1 and args.gatherTensors
+    # Determine process settings
+    args.nProcPerNode = torch.cuda.device_count()
+    args.nProcs = args.nProcPerNode * args.nodeCount
+    args.gatherTensors = (args.useDDP and args.nProcs > 1 and args.gatherTensors)
 
     # Launch multiple (or single) distributed processes for main_worker function - will automatically assign GPUs
-    if args.useDDP:
-        args.nProcPerNode = torch.cuda.device_count()
-        args.nProcs = args.nProcPerNode * args.nodeCount
+    if args.useDDP or args.nProcs > 1:
+        args.useDDP = True  # Ensure this flag is True, as multiple loops rely on it
         torch.multiprocessing.spawn(main_worker, nprocs=args.nProcs, args=(args,))
     # Launch one process for main_worker function
     else:
@@ -184,7 +184,6 @@ def main_worker(gpu, args):
         def print_pass(*args):
             pass
         builtins.print = print_pass
-
     print('- Using GPU {} as master process'.format(args.gpu))
 
     # Set up distributed training on backend
@@ -213,7 +212,7 @@ def main_worker(gpu, args):
 
     print('- Instantiating new model with {} backbone'.format(args.encArch))
     model = SSL_Model.Base_Model(args.encArch, args.rnCifarMod, args.vitPPFreeze, args.prjArch, args.prjHidDim, args.prjBotDim, args.prjOutDim,
-                                   args.prdHidDim, args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG)
+                                 args.prdHidDim, args.prdAlpha, args.prdEps, args.prdBeta, args.momEncBeta, args.applySG)
 
     # Set up model on parallel or single GPU
     if args.useDDP:

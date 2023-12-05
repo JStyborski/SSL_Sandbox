@@ -16,8 +16,8 @@ from Adversarial import FGSM_PGD, Local_Lip
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Load data
-trainRoot = r'D:/ImageNet-100/train'
-testRoot = r'D:/ImageNet-100/val'
+trainRoot = r'D:/Poisoned_ImageNet/UE_100/train'
+testRoot = r'D:/ImageNet100/val'
 
 # Find pretrained models
 dirName = 'Trained_Models'
@@ -217,8 +217,8 @@ for stateFile in ptList:
 
     # Create model and load model weights
     model = SSL_Model.Base_Model(ptStateDict['encArch'], ptStateDict['rnCifarMod'], ptStateDict['vitPPFreeze'], ptStateDict['prjArch'],
-                                   ptStateDict['prjHidDim'], ptStateDict['prjBotDim'], ptStateDict['prjOutDim'], ptStateDict['prdHidDim'],
-                                   None, 0.3, 0.5, 0.0, True)
+                                 ptStateDict['prjHidDim'], ptStateDict['prjBotDim'], ptStateDict['prjOutDim'], ptStateDict['prdHidDim'],
+                                 None, 0.3, 0.5, 0.0, True)
 
     # If a stateDict key has "module" in (from running parallel), create a new dictionary with the right names
     for key in list(ptStateDict['stateDict'].keys()):

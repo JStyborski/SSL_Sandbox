@@ -29,8 +29,6 @@ class Pretrain_Probes:
 
         self.epochProbe = Probe()
         self.lossProbe = Probe()
-        self.sslLossProbe = Probe()
-        self.aeLossProbe = Probe()
         self.r1r2AugSimProbe = Probe()
         self.r1AugSimProbe = Probe()
         self.r1r2AugConcProbe = Probe()
@@ -53,10 +51,8 @@ class Pretrain_Probes:
         self.p1mz2EigAlignProbe = Probe()
 
     # Assumes model is in eval mode, all inputs/outputs are detached, and all model/inputs/outputs are on same device
-    def update_probes(self, epoch, loss, sslLoss, aeLoss, p1, z1, r1, r2, mz2):
+    def update_probes(self, epoch, loss, p1, z1, r1, r2, mz2):
         loss = loss.cpu().numpy()
-        sslLoss = sslLoss.cpu().numpy()
-        aeLoss = aeLoss.cpu().numpy()
         p1 = p1.cpu().numpy()
         z1 = z1.cpu().numpy()
         r1 = r1.cpu().numpy()
@@ -67,8 +63,6 @@ class Pretrain_Probes:
 
         # Probe loss throughout training
         self.lossProbe.store(float(loss))
-        self.sslLossProbe.store(float(sslLoss))
-        self.aeLossProbe.store(float(aeLoss))
 
         # Get cosine similarity between encodings
         self.r1r2AugSimProbe.store(np.mean(AU.cos_sim_bt_vecs(r1, r2)))

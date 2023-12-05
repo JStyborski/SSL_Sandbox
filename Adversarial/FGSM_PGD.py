@@ -263,23 +263,23 @@ def ssl_pgd(model, lossFn, inpList, useAdvList, gatherTensors, alpha, eps, norm,
             advList = []
 
             # Loop through the augmentation tensors to initialize adversarial tensors
-            for i, aug in enumerate(augList):
+            for i, augTens in enumerate(augList):
 
                 # Apply random initial perturbation to input (or don't)
                 if randInit and useAdvList[i]:
                     if noiseMag is None:
                         noiseMag = eps
-                    noise = torch.zeros_like(aug).uniform_(-noiseMag, noiseMag)
+                    noise = torch.zeros_like(augTens).uniform_(-noiseMag, noiseMag)
                     noise = clip_tens(noise, list(range(1, len(noise.size()))), norm, eps)
-                    adv = aug + noise.to(aug.device)
+                    advTens = augTens + noise.to(augTens.device)
                 else:
-                    adv = aug
+                    advTens = augTens
 
                 # Ensure adv elements within appropriate bounds
                 if xMin is not None or xMax is not None:
-                    adv = torch.clamp(adv, xMin, xMax)
+                    advTens = torch.clamp(advTens, xMin, xMax)
 
-                advList.append(adv)
+                advList.append(advTens)
 
             for _ in range(nSteps):
 

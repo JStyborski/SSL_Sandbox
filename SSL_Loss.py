@@ -29,10 +29,13 @@ class Weighted_InfoNCE_Loss:
         # Loop through each view
         for i in range(len(outList)):
 
+            # Initialize loss for ith view
+            ithLoss = 0.
+
             # Calculate positive pairwise similarity loss for the ith view
             for j in range(len(outList)):
                 if i == j: continue
-                ithLoss = -1.0 * cosine_similarity(outList[i][0], outList[j][-1], reduction='mean')
+                ithLoss += -1.0 * cosine_similarity(outList[i][0], outList[j][-1], reduction='mean')
 
             # Calculate negative similarity loss (InfoNCE denominator) - This formulation is best seen in the BYOL paper
             if self.winceBeta > 0.0:
