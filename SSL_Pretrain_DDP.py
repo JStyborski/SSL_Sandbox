@@ -81,7 +81,7 @@ parser.add_argument('--applySG', default=True, type=lambda x:bool(strtobool(x)),
 parser.add_argument('--symmetrizeLoss', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to apply loss function equally on both augmentation batches')
 parser.add_argument('--lossType', default='wince', type=str, help='SSL loss type to apply')
 parser.add_argument('--winceBeta', default=0.0, type=float, help='Contrastive term coefficient in InfoNCE loss - set as 0.0 for no contrastive term')
-parser.add_argument('--winceTau', default=0.1, type=float, help='Contrastive loss temperature factor')
+parser.add_argument('--winceTau', default=0.2, type=float, help='Contrastive loss temperature factor')
 parser.add_argument('--btLam', default=0.005, type=float, help='Coefficient to apply to off-diagonal terms of BT loss')
 parser.add_argument('--btLossType', default='bt', type=str, help='Method of calculating loss for off-diagonal terms')
 parser.add_argument('--btNormType', default='bn', type=str, help='Method of normalizing encoding data')
@@ -97,13 +97,13 @@ parser.add_argument('--dinoTauT', default=0.05, type=float, help='Temperature fo
 # Adversarial training parameters
 parser.add_argument('--useAdvList', default=[False, False], nargs='+', type=lambda x:bool(strtobool(x)), help='List of Booleans to apply adversarial training for each view')
 parser.add_argument('--keepStd', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to train with the adversarial plus original images - increases batch size')
-parser.add_argument('--advAlpha', default=1/255, type=float, help='PGD step size')
-parser.add_argument('--advEps', default=8/255, type=float, help='PGD attack radius limit, measured in specified norm')
+parser.add_argument('--advAlpha', default=0.6/255 / 0.226, type=float, help='PGD step size')
+parser.add_argument('--advEps', default=4/255 / 0.226, type=float, help='PGD attack radius limit, measured in specified norm')
 parser.add_argument('--advNorm', default=float('inf'), type=float, help='Norm type for measuring perturbation radius')
 parser.add_argument('--advRestarts', default=1, type=int, help='Number of PGD restarts to search for best attack')
 parser.add_argument('--advSteps', default=10, type=int, help='Number of PGD steps to take')
-parser.add_argument('--advBatchSize', default=512, type=int, help='Batch size to use for adversarial training loader')
-parser.add_argument('--advNoise', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to use random initialization')
+parser.add_argument('--advBatchSize', default=128, type=int, help='Batch size to use for adversarial training loader')
+parser.add_argument('--advNoise', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to use random initialization')
 parser.add_argument('--advNoiseMag', default=None, type=float, help='Magnitude of noise to add to random start attack')
 parser.add_argument('--advClipMin', default=None, type=int, help='Minimium value to clip adversarial inputs')
 parser.add_argument('--advClipMax', default=None, type=int, help='Maximum value to clip adversarial inputs')
@@ -126,13 +126,14 @@ def main():
 
     args = parser.parse_args()
 
-    #args.trainRoot = r'D:/ImageNet-100/Poisoned/TAP_100/train'
+    #args.trainRoot = r'D:/Poisoned_ImageNet/TAP_100/train'
     #args.ptPrefix = 'Clean'
     #args.batchSize = 32
     #args.sslLossType = 'dino'
     #args.prdDim = 0
     #args.nEpochs = 1
     #args.encArch = 'vit_small'
+    #args.useAdvList = [True, False]
 
     if args.randSeed is not None:
         random.seed(args.randSeed)
@@ -314,9 +315,25 @@ def main_worker(gpu, args):
 
             # Run adversarial training
             if any(args.useAdvList):
+
+                # Need to set broadcast_buffers to False for adversarial training with SSL
+                # In the case of DDP with nProcs > 1, broadcast_buffers is true (sync BN on forward pass)
+                # With adversarial attack, the model should be set to eval mode to not update parameters while finding adversarial examples
+                # If you run a forward pass 2x with broadcast_buffers true, even for a model in eval mode, the hooks will try to broadcast
+                # This broadcast is seen as an in-place operation, replacing original values and causing an error in the grad graph
+                # Regular SSL is fine because the model is in train mode. SL AT is fine because there's only one forward pass
+                # https://github.com/pytorch/pytorch/issues/22095, https://github.com/pytorch/pytorch/issues/66504, https://discuss.pytorch.org/t/regular-batchnorm-triggers-buffer-broadcast/137801
+                if args.useDDP and args.nProcs > 1:
+                    model.broadcast_buffers = False
+
                 _, advTensList = FGSM_PGD.ssl_pgd(model, lossFn, augList, args.useAdvList, args.gatherTensors, args.advAlpha, args.advEps,
                                                   args.advNorm, args.advRestarts, args.advSteps, args.advBatchSize, targeted=False,
                                                   randInit=args.advNoise, noiseMag=args.advNoiseMag, xMin=args.advClipMin, xMax=args.advClipMax)
+
+                # Reset model broadcast buffers setting if altered earlier
+                if args.useDDP and args.nProcs > 1:
+                    model.broadcast_buffers = True
+
                 for i in range(len(advTensList)):
                     if args.keepStd:
                         augList[i] = torch.cat((augList[i], advTensList[i].detach()), dim=0).cuda(args.gpu, non_blocking=True)

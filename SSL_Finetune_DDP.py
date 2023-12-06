@@ -59,13 +59,13 @@ parser.add_argument('--decayFactor', default=0.2, type=float, help='Factor by wh
 # Adversarial training parameters
 parser.add_argument('--useAdv', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to apply adversarial training')
 parser.add_argument('--keepStd', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to train with the adversarial plus original images - increases batch size')
-parser.add_argument('--advAlpha', default=1/255, type=float, help='PGD step size')
-parser.add_argument('--advEps', default=8/255, type=float, help='PGD attack radius limit, measured in specified norm')
+parser.add_argument('--advAlpha', default=0.6/255 / 0.226, type=float, help='PGD step size')
+parser.add_argument('--advEps', default=4/255 / 0.226, type=float, help='PGD attack radius limit, measured in specified norm')
 parser.add_argument('--advNorm', default=float('inf'), type=float, help='Norm type for measuring perturbation radius')
 parser.add_argument('--advRestarts', default=1, type=int, help='Number of PGD restarts to search for best attack')
 parser.add_argument('--advSteps', default=10, type=int, help='Number of PGD steps to take')
 parser.add_argument('--advBatchSize', default=512, type=int, help='Batch size to use for adversarial training loader')
-parser.add_argument('--advNoise', default=False, type=lambda x:bool(strtobool(x)), help='Boolean to use random initialization')
+parser.add_argument('--advNoise', default=True, type=lambda x:bool(strtobool(x)), help='Boolean to use random initialization')
 parser.add_argument('--advNoiseMag', default=None, type=float, help='Magnitude of noise to add to random start attack')
 parser.add_argument('--advClipMin', default=None, type=int, help='Minimium value to clip adversarial inputs')
 parser.add_argument('--advClipMax', default=None, type=int, help='Maximum value to clip adversarial inputs')
@@ -80,7 +80,7 @@ def main():
 
     # HY Adversarial Training Overwrites
     #args.ptDir = 'Trained_Models'
-    #args.trainRoot = r'../Datasets/Poisoned_ImageNet/RUE_100/train'
+    #args.trainRoot = r'D:/Poisoned_ImageNet/RUE_100/train'
     #args.ftPrefix = 'RUE'
     #args.ftType = 'ft'
     #args.batchSize = 128

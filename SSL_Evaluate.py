@@ -50,8 +50,8 @@ testAccBatches = 1e6
 # Adversarial parameters
 atkSamples = 1024
 atkBatchSize = 32
-advAlpha = 0.6/255
-advEps = 4/255
+advAlpha = 0.6/255 / 0.226
+advEps = 4/255 / 0.226
 advRestarts = 5
 advSteps = 10
 randInit = True
