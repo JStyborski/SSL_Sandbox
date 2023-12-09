@@ -80,7 +80,7 @@ def main():
 
     # HY Adversarial Training Overwrites
     #args.ptDir = 'Trained_Models'
-    #args.trainRoot = r'D:/Poisoned_ImageNet/RUE_100/train'
+    #args.trainRoot = r'../Datasets/Poisoned_ImageNet/RUE_100/train'
     #args.ftPrefix = 'RUE'
     #args.ftType = 'ft'
     #args.batchSize = 128

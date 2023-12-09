@@ -2,43 +2,84 @@ import random
 from PIL import Image, ImageFilter
 import numpy as np
 import torch
-import torchvision.transforms as transforms
+import torchvision.transforms as T
+import kornia.augmentation as K
 
 def t_pretrain(cropSize):
-    t = transforms.Compose([
-        transforms.RandomResizedCrop(cropSize, scale=(0.2, 1.)),
-        transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
+    t = T.Compose([
+        T.RandomResizedCrop(cropSize, scale=(0.2, 1.)),
+        T.RandomApply([T.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+        T.RandomGrayscale(p=0.2),
+        T.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
+        T.RandomHorizontalFlip(),
+        T.ToTensor(),
         #RandomFilter(),
         #GaussianNoise(0.25),
         #RandomMask(cropSize, 16, 0.7),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     return t
 
 def t_finetune(cropSize):
-    t = transforms.Compose([
-        transforms.RandomResizedCrop(cropSize),
+    t = T.Compose([
+        T.RandomResizedCrop(cropSize),
         # I saw one script use the transform below for SL. I think it is too simple, since it applies no scale or ratio
         # Test performance increases ~1% on IN100 when finetuning with below. I think it's info leak, since test images are cropped the same way
         #transforms.Resize(int(round(1.1428 * cropSize))),  # CIFAR: 1.1428 * 28 = 32, IN: 1.1428 * 224 = 256
         #transforms.RandomCrop(cropSize),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        T.RandomHorizontalFlip(),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     return t
 
 def t_test(cropSize):
-    t = transforms.Compose([
-        transforms.Resize(int(round(1.1428 * cropSize))),  # CIFAR: 1.1428 * 28 = 32, IN: 1.1428 * 224 = 256
-        transforms.CenterCrop(cropSize),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    t = T.Compose([
+        T.Resize(int(round(1.1428 * cropSize))),  # CIFAR: 1.1428 * 28 = 32, IN: 1.1428 * 224 = 256
+        T.CenterCrop(cropSize),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
+    return t
+
+def t_tensor():
+    t = T.Compose([T.ToTensor()])
+    return t
+
+def t_tensor_aug(cropSize):
+    t = T.Compose([
+        #T.Resize(int(round(1.1428 * cropSize))),  # CIFAR: 1.1428 * 28 = 32, IN: 1.1428 * 224 = 256
+        #T.CenterCrop(cropSize),
+        T.RandomResizedCrop(cropSize, scale=(0.2, 1.), antialias=True),
+        T.RandomApply([T.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+        T.RandomGrayscale(p=0.2),
+        #T.RandomApply([GaussianBlur([.1, 2.])], p=0.5),
+        T.RandomApply([T.GaussianBlur(9, sigma=(0.1, 2.0))], p=0.5),
+        T.RandomHorizontalFlip(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    return t
+
+def t_batch_tensor_aug(cropSize):
+    tensorAug = t_tensor_aug(cropSize)
+    t = T.Lambda(lambda x: torch.stack([tensorAug(x_) for x_ in x]))
+    return t
+
+def k_tensor_aug(cropSize):
+   k = torch.nn.Sequential(
+       #K.Resize(int(round(1.1428 * cropSize))),  # CIFAR: 1.1428 * 28 = 32, IN: 1.1428 * 224 = 256
+       #K.CenterCrop(cropSize),
+       K.RandomResizedCrop(size=(cropSize), scale=(0.2, 1.)),
+       K.ColorJitter(0.4, 0.4, 0.4, 0.1, p=0.8),
+       K.RandomGrayscale(p=0.2),
+       K.RandomHorizontalFlip(),
+       K.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    )
+   return k
+
+def k_batch_tensor_aug(cropSize):
+    tensorAug = k_tensor_aug(cropSize)
+    t = T.Lambda(lambda x: torch.stack([tensorAug(x_) for x_ in x]))
     return t
 
 

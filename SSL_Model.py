@@ -6,7 +6,7 @@ from timm.models.vision_transformer import _create_vision_transformer
 
 
 class Base_Model(nn.Module):
-    def __init__(self, encArch=None, cifarMod=False, vitPPFreeze=True, prjArch='moco', prjHidDim=2048, prjBotDim=256, prjOutDim=2048, prdHidDim=512,
+    def __init__(self, encArch=None, rnCifarMod=False, vitPPFreeze=True, prjArch='moco', prjHidDim=2048, prjBotDim=256, prjOutDim=2048, prdHidDim=512,
                  prdAlpha=None, prdEps=0.3, prdBeta=0.5, momEncBeta=0, applySG=True):
         super(Base_Model, self).__init__()
         self.prdAlpha = prdAlpha
@@ -20,7 +20,7 @@ class Base_Model(nn.Module):
             # Use TorchVision ResNets
             self.encoder = models.__dict__[encArch](zero_init_residual=True)
             self.encoder.fc = nn.Identity()
-            if cifarMod:
+            if rnCifarMod:
                 # ResNet mod for CIFAR images
                 self.encoder.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=2, bias=False)
                 self.encoder.maxpool = nn.Identity()

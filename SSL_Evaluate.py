@@ -16,7 +16,7 @@ from Adversarial import FGSM_PGD, Local_Lip
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Load data
-trainRoot = r'D:/Poisoned_ImageNet/UE_100/train'
+trainRoot = r'D:/Poisoned_ImageNet/TAP_100/train'
 testRoot = r'D:/ImageNet100/val'
 
 # Find pretrained models
@@ -55,8 +55,8 @@ advEps = 4/255 / 0.226
 advRestarts = 5
 advSteps = 10
 randInit = True
-xMin = None # 0.
-xMax = None # 1.
+xMin = None #0.
+xMax = None #1.
 
 ##############
 # Data Setup #

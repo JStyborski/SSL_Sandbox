@@ -82,6 +82,7 @@ parser.add_argument('--symmetrizeLoss', default=True, type=lambda x:bool(strtobo
 parser.add_argument('--lossType', default='wince', type=str, help='SSL loss type to apply')
 parser.add_argument('--winceBeta', default=0.0, type=float, help='Contrastive term coefficient in InfoNCE loss - set as 0.0 for no contrastive term')
 parser.add_argument('--winceTau', default=0.2, type=float, help='Contrastive loss temperature factor')
+parser.add_argument('--winceEps', default=0.0, type=float, help='Similarity perturbation constant for disentanglement - 0.0 applies no modification')
 parser.add_argument('--btLam', default=0.005, type=float, help='Coefficient to apply to off-diagonal terms of BT loss')
 parser.add_argument('--btLossType', default='bt', type=str, help='Method of calculating loss for off-diagonal terms')
 parser.add_argument('--btNormType', default='bn', type=str, help='Method of normalizing encoding data')
@@ -126,9 +127,11 @@ def main():
 
     args = parser.parse_args()
 
-    #args.trainRoot = r'D:/Poisoned_ImageNet/TAP_100/train'
-    #args.ptPrefix = 'Clean'
+    #args.trainRoot = r'D:/ImageNet100/train'
+    #args.ptPrefix = 'RN18'
     #args.batchSize = 32
+    #args.winceBeta = 1.0
+    #args.winceEps = 0.1
     #args.sslLossType = 'dino'
     #args.prdDim = 0
     #args.nEpochs = 1
@@ -208,6 +211,8 @@ def main_worker(gpu, args):
     else:
         trainSampler = None
     # Note that DistributedSampler automatically shuffles dataset given the set_epoch() function during training
+    #trainDataLoader = torch.utils.data.DataLoader(trainDataset, batch_size=args.batchSize, shuffle=(trainSampler is None),
+    #                                              num_workers=args.workers, pin_memory=True, sampler=trainSampler, drop_last=True)
     trainDataLoader = torch.utils.data.DataLoader(trainDataset, batch_size=args.batchSize, shuffle=(trainSampler is None),
                                                   num_workers=args.workers, pin_memory=True, sampler=trainSampler, drop_last=True)
 
@@ -236,7 +241,7 @@ def main_worker(gpu, args):
 
     print('- Instantiating loss functions')
     if args.lossType == 'wince':
-        lossFn = SSL_Loss.Weighted_InfoNCE_Loss(args.symmetrizeLoss, args.winceBeta, args.winceTau)
+        lossFn = SSL_Loss.Weighted_InfoNCE_Loss(args.symmetrizeLoss, args.winceBeta, args.winceTau, args.winceEps)
     elif args.lossType == 'bt':
         lossFn = SSL_Loss.Barlow_Twins_Loss(args.symmetrizeLoss, args.btLam, args.btLossType, args.btNormType)
     elif args.lossType == 'vicreg':

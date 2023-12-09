@@ -11,15 +11,17 @@ class Weighted_InfoNCE_Loss:
     # - BYOL actually uses MSE loss. However for normalized outputs, minimizing MSE loss minimizes a scaled cosine similarity
     # - MoCoV3 actually uses CE loss, though I think their formulation is equivalent to InfoNCE, since InfoNCE is technically a CE loss
 
-    def __init__(self, symmetrizeLoss=True, winceBeta=0.0, winceTau=0.1):
+    def __init__(self, symmetrizeLoss=True, winceBeta=0.0, winceTau=0.1, winceEps=0.0):
         """
         :param symmetrizeLoss: [Bool] - Boolean to symmetrize loss
         :param winceBeta: [float] - Coefficient weight for contrastive loss term (0 gives SimSiam loss, 1 gives InfoNCE)
         :param winceTau: [float] - Temperature term used in InfoNCE loss
+        :param winceEps: [float] - Constant similarity perturbation for disentanglement, as in https://arxiv.org/abs/2106.11230
         """
         self.symmetrizeLoss = symmetrizeLoss
         self.winceBeta = winceBeta
         self.winceTau = winceTau
+        self.winceEps = winceEps
 
     def __call__(self, outList):
 
@@ -35,24 +37,26 @@ class Weighted_InfoNCE_Loss:
             # Calculate positive pairwise similarity loss for the ith view
             for j in range(len(outList)):
                 if i == j: continue
-                ithLoss += -1.0 * cosine_similarity(outList[i][0], outList[j][-1], reduction='mean')
+                ithLoss += -1.0 * cosine_similarity(outList[i][0], outList[j][-1], reduction='mean') + self.winceEps
 
             # Calculate negative similarity loss (InfoNCE denominator) - This formulation is best seen in the BYOL paper
             if self.winceBeta > 0.0:
 
                 # Calculate the pairwise cosine similarity matrices for same-view similarity
-                nss = pairwise_cosine_similarity(outList[i][0], outList[i][0])
+                nss = pairwise_cosine_similarity(outList[i][0], outList[i][0]) + self.winceEps
                 nss.fill_diagonal_(0.0)  # Self-similarity within view skips itself (similarity = 1 otherwise)
 
-                # Concatenate a tensor for all differing views and calculate pairwise similarity to ith view
+                # Calculate pairwise similarity to ith view and concatenate results
                 ndsList = []
                 for j in range(len(outList)):
                     if i == j: continue
-                    ndsList.append(outList[j][-1])
-                ndsTens = torch.concatenate(ndsList, dim=0).to(nss.device)
-                nds = pairwise_cosine_similarity(outList[i][0], ndsTens)
+                    ndsTens = pairwise_cosine_similarity(outList[i][0], outList[j][-1]) + self.winceEps
+                    if self.winceEps != 0.0:
+                        ndsTens -= 2.0 * self.winceEps * torch.eye(ndsTens.size(0), device=ndsTens.device)
+                    ndsList.append(ndsTens)
+                nds = torch.concatenate(ndsList, dim=1).to(nss.device)
 
-                # To implement InfoNCE contrastive terms correctly, first reweight the positive similarity loss by Tau
+                # To implement InfoNCE contrastive terms correctly, first reweight the positive similarity loss by eps and tau
                 # Then add the contrastive loss terms for the 2 pairwise similarity tensors
                 ithLoss /= self.winceTau
                 ithLoss += self.winceBeta * (torch.exp(nss / self.winceTau).sum(dim=-1) +
