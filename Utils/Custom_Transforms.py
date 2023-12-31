@@ -3,7 +3,6 @@ from PIL import Image, ImageFilter
 import numpy as np
 import torch
 import torchvision.transforms as T
-import kornia.augmentation as K
 
 def t_pretrain(cropSize):
     t = T.Compose([
@@ -43,13 +42,11 @@ def t_test(cropSize):
     return t
 
 def t_tensor():
-    t = T.Compose([T.ToTensor()])
+    t = T.ToTensor()
     return t
 
 def t_tensor_aug(cropSize):
     t = T.Compose([
-        #T.Resize(int(round(1.1428 * cropSize))),  # CIFAR: 1.1428 * 28 = 32, IN: 1.1428 * 224 = 256
-        #T.CenterCrop(cropSize),
         T.RandomResizedCrop(cropSize, scale=(0.2, 1.), antialias=True),
         T.RandomApply([T.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
         T.RandomGrayscale(p=0.2),
@@ -58,28 +55,6 @@ def t_tensor_aug(cropSize):
         T.RandomHorizontalFlip(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-    return t
-
-def t_batch_tensor_aug(cropSize):
-    tensorAug = t_tensor_aug(cropSize)
-    t = T.Lambda(lambda x: torch.stack([tensorAug(x_) for x_ in x]))
-    return t
-
-def k_tensor_aug(cropSize):
-   k = torch.nn.Sequential(
-       #K.Resize(int(round(1.1428 * cropSize))),  # CIFAR: 1.1428 * 28 = 32, IN: 1.1428 * 224 = 256
-       #K.CenterCrop(cropSize),
-       K.RandomResizedCrop(size=(cropSize), scale=(0.2, 1.)),
-       K.ColorJitter(0.4, 0.4, 0.4, 0.1, p=0.8),
-       K.RandomGrayscale(p=0.2),
-       K.RandomHorizontalFlip(),
-       K.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    )
-   return k
-
-def k_batch_tensor_aug(cropSize):
-    tensorAug = k_tensor_aug(cropSize)
-    t = T.Lambda(lambda x: torch.stack([tensorAug(x_) for x_ in x]))
     return t
 
 
@@ -161,5 +136,5 @@ class NTimesTransform:
 
     def __call__(self, x):
         tList = [self.base_transform(x) for _ in range(self.n_views)]
-        return tList
 
+        return tList

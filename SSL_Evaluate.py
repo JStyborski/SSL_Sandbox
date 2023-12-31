@@ -16,7 +16,7 @@ from Adversarial import FGSM_PGD, Local_Lip
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Load data
-trainRoot = r'D:/Poisoned_ImageNet/TAP_100/train'
+trainRoot = r'D:/Poisoned_ImageNet/UE_100/train'
 testRoot = r'D:/ImageNet100/val'
 
 # Find pretrained models
@@ -227,7 +227,7 @@ for stateFile in ptList:
             del ptStateDict['stateDict'][key]
 
     # Load weights
-    model.load_state_dict(ptStateDict['stateDict'], strict=True)
+    model.load_state_dict(ptStateDict['stateDict'], strict=False)
 
     # Replace the projector with identity and the predictor with linear classifier
     encDim = model.encoder.inplanes if 'resnet' in ptStateDict['encArch'] else model.encoder.num_features

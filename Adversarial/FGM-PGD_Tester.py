@@ -137,8 +137,8 @@ loss = torch.nn.CrossEntropyLoss(reduction='none')
 batch_size = 2
 avgLoss, x_adv = sl_pgd(model, loss, imgTens, labelTens, alpha, eps, norm, n_restarts, n_steps, batch_size,
                                outIdx=None, targeted=targeted, rand_init=rand_init, noise_mag=None, x_min=0., x_max=1.)
-#import torchattacks
-#attacker = torchattacks.PGD
+import torchattacks
+attacker = torchattacks.PGD
 #atk = attacker(model, eps=eps, alpha=alpha, steps=n_steps, random_start=rand_init)
 #x_adv = atk(imgTens, labelTens)
 #avgLoss = 1000

@@ -24,44 +24,65 @@ class Weighted_InfoNCE_Loss:
         self.winceEps = winceEps
 
     def __call__(self, outList):
+        # The paper that uses similarity perturbation for disentanglement is a sum of regular and perturbed InfoNCE losses
+        # To save on compute, the epsilon-based perturbed loss shadows the regular loss at every step
+        # The epsilon-based loss is only triggered if self.winceEps > 0.0
 
         # Track loss across all views
-        totalLoss = 0
+        totalLoss = 0.
 
         # Loop through each view
         for i in range(len(outList)):
 
-            # Initialize loss for ith view
-            ithLoss = 0.
+            # Initialize losses for ith view
+            posLoss = 0.
+            posLossEps = 0.
+            negLoss = 0.
+            negLossEps = 0.
 
             # Calculate positive pairwise similarity loss for the ith view
             for j in range(len(outList)):
                 if i == j: continue
-                ithLoss += -1.0 * cosine_similarity(outList[i][0], outList[j][-1], reduction='mean') + self.winceEps
+                posLoss += -1.0 * cosine_similarity(outList[i][0], outList[j][-1], reduction='mean')
+            if self.winceEps > 0.0: posLossEps = posLoss + self.winceEps * (len(outList) - 1)
 
             # Calculate negative similarity loss (InfoNCE denominator) - This formulation is best seen in the BYOL paper
             if self.winceBeta > 0.0:
 
-                # Calculate the pairwise cosine similarity matrices for same-view similarity
-                nss = pairwise_cosine_similarity(outList[i][0], outList[i][0]) + self.winceEps
-                nss.fill_diagonal_(0.0)  # Self-similarity within view skips itself (similarity = 1 otherwise)
+                # First reweight positive loss by tau for correct InfoNCE implementation
+                posLoss /= self.winceTau
+                if self.winceEps > 0.0: posLossEps /= self.winceTau
 
-                # Calculate pairwise similarity to ith view and concatenate results
+                # Calculate the pairwise cosine similarity matrices for same-view similarity
+                nss = pairwise_cosine_similarity(outList[i][0], outList[i][0])
+                if self.winceEps > 0.0: nssEps = nss + self.winceEps
+
+                # Self-similarity within view skips itself (similarity = 1 otherwise)
+                nss.fill_diagonal_(0.0)
+                if self.winceEps > 0.0: nssEps.fill_diagonal_(0.0)
+
+                # Calculate pairwise similarity to ith view
                 ndsList = []
+                ndsEpsList = []
                 for j in range(len(outList)):
                     if i == j: continue
-                    ndsTens = pairwise_cosine_similarity(outList[i][0], outList[j][-1]) + self.winceEps
-                    if self.winceEps != 0.0:
-                        ndsTens -= 2.0 * self.winceEps * torch.eye(ndsTens.size(0), device=ndsTens.device)
+                    ndsTens = pairwise_cosine_similarity(outList[i][0], outList[j][-1])
                     ndsList.append(ndsTens)
+                    if self.winceEps > 0.0:
+                        ndsEpsTens = ndsTens
+                        ndsEpsList.append(ndsEpsTens)
+
+                # Concatenate results
                 nds = torch.concatenate(ndsList, dim=1).to(nss.device)
+                if self.winceEps > 0.0: ndsEps = torch.concatenate(ndsEpsList, dim=1).to(nss.device)
 
-                # To implement InfoNCE contrastive terms correctly, first reweight the positive similarity loss by eps and tau
-                # Then add the contrastive loss terms for the 2 pairwise similarity tensors
-                ithLoss /= self.winceTau
-                ithLoss += self.winceBeta * (torch.exp(nss / self.winceTau).sum(dim=-1) +
-                                             torch.exp(nds / self.winceTau).sum(dim=-1)).log().mean()
+                # Add the contrastive loss terms for the 2 pairwise similarity tensors
+                negLoss = (torch.exp(nss / self.winceTau).sum(dim=-1) + torch.exp(nds / self.winceTau).sum(dim=-1)).log().mean()
+                if self.winceEps > 0.0: negLossEps = (torch.exp(nssEps / self.winceTau).sum(dim=-1) + torch.exp(ndsEps / self.winceTau).sum(dim=-1)).log().mean()
 
+            # Calculate final loss from positive/negative losses (optionally includes epsilon-based losses)
+            ithLoss = posLoss + self.winceBeta * negLoss
+            if self.winceEps > 0.0: ithLoss = (ithLoss + posLossEps + self.winceBeta * negLossEps) / 2.0
             totalLoss += ithLoss
 
             # If not symmetrizing loss, break after calculating loss for first component
@@ -171,21 +192,32 @@ class VICReg_Loss:
         # Loop through each view
         for i in range(len(outList)):
 
+            # Initialize losses for ith view
+            vLoss, iLoss, cLoss = 0., 0., 0.
+
             # Calculate ith view covariance and then the covariance and variance losses for it
             covI = torch.cov(outList[i][0].t())
-            totalLoss += self.vicGamma * 2 / d * torch.triu(covI, 1).square().sum()
-            totalLoss += self.vicAlpha * (1 - torch.diag(covI).clamp(1e-6).sqrt()).clamp(0).mean()
+            cLoss += 2 / d * torch.triu(covI, 1).square().sum()
+            vLoss += (1 - torch.diag(covI).clamp(1e-6).sqrt()).clamp(0).mean()
 
             for j in range(len(outList)):
                 if i == j: continue
 
                 # Calculate jth view covariance and then the covariance and variance losses for it
                 covJ = torch.cov(outList[j][-1].t())
-                totalLoss += self.vicGamma * 2 / d * torch.triu(covJ, 1).square().sum()
-                totalLoss += self.vicAlpha * (1 - torch.diag(covJ).clamp(1e-6).sqrt()).clamp(0).mean()
+                cLoss += 2 / d * torch.triu(covJ, 1).square().sum()
+                vLoss += (1 - torch.diag(covJ).clamp(1e-6).sqrt()).clamp(0).mean()
 
                 # Invariance loss between ith and jth views
-                totalLoss += self.vicBeta * torch.linalg.vector_norm(outList[i][0] - outList[j][-1], ord=2, dim=1).square().mean()
+                # In the paper, the equation is the batch mean of the squared L2 norm of the difference between z1 and z2
+                # The following represent what the equation seems to be - they are equivalent
+                # torch.linalg.vector_norm(outList[i][0] - outList[j][-1], ord=2, dim=1).square().mean()
+                # (outList[i][0] - outList[j][-1]).square().sum(dim=1).mean()
+                # However, the pseudocode and official implementation is MSELoss, which is equivalent to
+                # (outList[i][0] - outList[j][-1]).square().mean()
+                iLoss += nn.functional.mse_loss(outList[i][0], outList[j][-1])
+
+            totalLoss += self.vicAlpha * vLoss + self.vicBeta * iLoss + self.vicGamma * cLoss
 
             # If not symmetrizing loss, break after calculating loss for first component
             if not self.symmetrizeLoss:

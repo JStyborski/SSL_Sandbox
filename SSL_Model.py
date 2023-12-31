@@ -200,7 +200,7 @@ def build_proj(arch, encDim, prjHidDim, prjBotDim, prjOutDim):
             nn.Linear(prjHidDim, prjOutDim, bias=False),
         )
 
-    elif arch == 'barlow_twins' or arch == 'vicreg':
+    elif arch == 'bt' or arch == 'vicreg':
         proj = nn.Sequential(
             nn.Linear(encDim, prjHidDim, bias=False),
             nn.BatchNorm1d(prjHidDim),
@@ -212,7 +212,6 @@ def build_proj(arch, encDim, prjHidDim, prjBotDim, prjOutDim):
         )
 
     elif arch == 'dino_cnn':
-        botNeckDim = 256  # Temporary hack: DINO ViT uses an extra bottleneck layer, and I don't have a variable setup yet
         proj = nn.Sequential(
             nn.Linear(encDim, prjHidDim, bias=True),
             nn.BatchNorm1d(prjHidDim),
@@ -220,9 +219,9 @@ def build_proj(arch, encDim, prjHidDim, prjBotDim, prjOutDim):
             nn.Linear(prjHidDim, prjHidDim, bias=True),
             nn.BatchNorm1d(prjHidDim),
             nn.GELU(),
-            nn.Linear(prjHidDim, botNeckDim, bias=True),
+            nn.Linear(prjHidDim, prjBotDim, bias=True),
             L2_Norm_Layer(dim=1),
-            nn.utils.weight_norm(nn.Linear(botNeckDim, prjOutDim, bias=False))
+            nn.utils.weight_norm(nn.Linear(prjBotDim, prjOutDim, bias=False))
         )
         proj[-1].weight_g.data.fill_(1.)
         proj[-1].weight_g.requires_grad = False

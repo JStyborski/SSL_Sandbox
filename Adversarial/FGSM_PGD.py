@@ -13,7 +13,10 @@ def scale_tens(tens, tens_idx, norm, eps):
     # :norm (float, int, or 'inf'): the type of norm to apply to tens
     # :eps (float or int): the maximum allowable norm value of tens
     # :returns: scaled_tens
-    
+
+    if tens_idx is None:
+        tens_idx = list(range(1, len(tens.size())))
+
     # Get the norm of tens across the specified indices
     tens_norm = torch.norm(tens, dim=tens_idx, keepdim=True, p=norm)
     
@@ -39,11 +42,14 @@ def clip_tens(tens, tens_idx, norm, eps):
     # I keep this part to ensure the function still works if people want to "clip" for other norms
     # Note that in 2-norm, clipping and scaling are identical processes
     else:
+
+        if tens_idx is None:
+            tens_idx = list(range(1, len(tens.size())))
         clipped_tens = scale_tens(tens, tens_idx, norm, eps)
     
     return clipped_tens
 
-def optimize_linear(grad, grad_idx, norm=np.inf):
+def optimize_linear(grad, grad_idx=None, norm=np.inf):
     # Solves for the optimal input to a linear function under a norm constraint.
     # Optimal_perturbation = argmax_eta,||eta||_p<=1(dot(eta, grad))
     # i.e., Find eta s.t. pth norm of eta <= 1 such that dot(eta, grad) is maximized
@@ -51,7 +57,7 @@ def optimize_linear(grad, grad_idx, norm=np.inf):
     # :grad_idx (list): the list of grad dimension indices along which to calculate norms - dimensions not included will have a separate norm value for each element
     # :norm (number): np.inf, 1, or 2. Order of norm constraint.
     # :returns eta (Tensor): optimal perturbation, the eta where ||eta||_p <= 1
-    
+
     # dot(eta, grad) with ||eta||inf = max(abs(eta)) <= 1 is maximized when eta=sign(grad)
     # Optimal inf-norm constrained perturbation direction is the max magnitude grad value in every dimension
     if norm == np.inf:
@@ -60,6 +66,9 @@ def optimize_linear(grad, grad_idx, norm=np.inf):
     # dot(eta, grad) with ||eta||1 = sum(abs(eta_i)) <= 1 is maximized when eta is a +/- 1-hot corresponding to the maximum magnitude value of grad
     # Optimal 1-norm constrained perturbation direction is the max magnitude pixel value in any dimension
     elif norm == 1:
+
+        if grad_idx is None:
+            grad_idx = list(range(1, len(grad.size())))
     
         # Absolute value and sign tensors of gradient, used later
         abs_grad = torch.abs(grad)
@@ -79,6 +88,9 @@ def optimize_linear(grad, grad_idx, norm=np.inf):
     # dot(eta, grad) with ||eta||2 = sqrt(sum(eta_i^2)) <= 1 is maximized when eta is equal to the normalized gradient vector
     # Optimal 2-norm constrained perturbation direction is Euclidean scaling along the gradient vector
     elif norm == 2:
+
+        if grad_idx is None:
+            grad_idx = list(range(1, len(grad.size())))
     
         # Get the 2 norm of the gradient vector for each batch sample and normalize
         eta = grad / torch.norm(grad, dim=grad_idx, keepdim=True, p=2)
@@ -144,7 +156,7 @@ def sl_pgd(model, lossFn, X, Y, alpha, eps, norm, nRestarts, nSteps, batchSize, 
                     noiseMag = eps
                 noise = torch.zeros_like(x).uniform_(-noiseMag, noiseMag)
                 # Clip noise to ensure it does not violate x_adv norm constraint and then apply to x
-                noise = clip_tens(noise, list(range(1, len(noise.size()))), norm, eps)
+                noise = clip_tens(noise, None, norm, eps)
                 xAdv = x + noise.to(x.device)
             else:
                 xAdv = x
@@ -170,14 +182,14 @@ def sl_pgd(model, lossFn, X, Y, alpha, eps, norm, nRestarts, nSteps, batchSize, 
 
                 # eta is the norm-constrained direction that maximizes dot(perturbation, x.grad)
                 # eta is detached, since x_adv.grad does not carry autograd
-                eta = optimize_linear(xAdv.grad, list(range(1, len(xAdv.grad.size()))), norm)
+                eta = optimize_linear(xAdv.grad, None, norm)
 
                 # Add perturbation to original example to step away from correct label and obtain adversarial example
                 # x_adv is detached, since x_adv.data does not carry autograd
                 xAdv = xAdv.data + alpha * eta
 
                 # Clip total perturbation (measured from center x) to norm ball associated with x_adv limit
-                eta = clip_tens(xAdv - x, list(range(1, len(x.size()))), norm, eps)
+                eta = clip_tens(xAdv - x, None, norm, eps)
                 xAdv = x + eta
 
                 # Ensure x_adv elements within appropriate bounds
@@ -270,7 +282,7 @@ def ssl_pgd(model, lossFn, inpList, useAdvList, gatherTensors, alpha, eps, norm,
                     if noiseMag is None:
                         noiseMag = eps
                     noise = torch.zeros_like(augTens).uniform_(-noiseMag, noiseMag)
-                    noise = clip_tens(noise, list(range(1, len(noise.size()))), norm, eps)
+                    noise = clip_tens(noise, None, norm, eps)
                     advTens = augTens + noise.to(augTens.device)
                 else:
                     advTens = augTens
@@ -299,6 +311,7 @@ def ssl_pgd(model, lossFn, inpList, useAdvList, gatherTensors, alpha, eps, norm,
                     # Calculate outputs and append
                     pAdv, _, _, mzAdv = model(advList[i])
                     if gatherTensors:
+                        torch.distributed.barrier() # Sync processes before gathering inputs
                         pAdv = torch.cat(MF.FullGatherLayer.apply(pAdv.contiguous()), dim=0)
                         mzAdv = torch.cat(MF.FullGatherLayer.apply(mzAdv.contiguous()), dim=0)
                     outList.append([pAdv, mzAdv])
@@ -314,9 +327,9 @@ def ssl_pgd(model, lossFn, inpList, useAdvList, gatherTensors, alpha, eps, norm,
 
                     # Update adversarial tensors based on backpropagated gradients
                     if useAdvList[i]:
-                        eta = optimize_linear(advList[i].grad, list(range(1, len(advList[i].grad.size()))), norm)
+                        eta = optimize_linear(advList[i].grad, None, norm)
                         advList[i] = advList[i].data + alpha * eta
-                        eta = clip_tens(advList[i] - augList[i], list(range(1, len(augList[i].size()))), norm, eps)
+                        eta = clip_tens(advList[i] - augList[i], None, norm, eps)
                         advList[i] = augList[i] + eta
 
                     # Ensure adv elements within appropriate bounds
