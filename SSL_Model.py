@@ -221,10 +221,10 @@ def build_proj(arch, encDim, prjHidDim, prjBotDim, prjOutDim):
             nn.GELU(),
             nn.Linear(prjHidDim, prjBotDim, bias=True),
             L2_Norm_Layer(dim=1),
-            nn.utils.weight_norm(nn.Linear(prjBotDim, prjOutDim, bias=False))
+            nn.utils.parametrizations.weight_norm(nn.Linear(prjBotDim, prjOutDim, bias=False))
         )
-        proj[-1].weight_g.data.fill_(1.)
-        proj[-1].weight_g.requires_grad = False
+        proj[-1].parametrizations.weight.original0.data.fill_(1.)
+        proj[-1].parametrizations.weight.original0.requires_grad = False
 
     elif arch == 'dino_vit':
         proj = nn.Sequential(
@@ -234,9 +234,9 @@ def build_proj(arch, encDim, prjHidDim, prjBotDim, prjOutDim):
             nn.GELU(),
             nn.Linear(prjHidDim, prjBotDim, bias=True),
             L2_Norm_Layer(dim=1),
-            nn.utils.weight_norm(nn.Linear(prjBotDim, prjOutDim, bias=False))
+            nn.utils.parametrizations.weight_norm(nn.Linear(prjBotDim, prjOutDim, bias=False))
         )
-        proj[-1].weight_g.data.fill_(1.)
-        proj[-1].weight_g.requires_grad = False
+        proj[-1].parametrizations.weight.original0.data.fill_(1.)
+        proj[-1].parametrizations.weight.original0.requires_grad = False
 
     return proj

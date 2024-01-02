@@ -90,7 +90,7 @@ parser.add_argument('--vicBeta', default=25.0, type=float, help='Coefficient on 
 parser.add_argument('--vicGamma', default=1.0, type=float, help='Coefficient on covariance loss term')
 parser.add_argument('--mecEd2', default=0.06, type=float, help='Related to the coefficient applied to correlation matrix')
 parser.add_argument('--mecTaylorTerms', default=2, type=int, help='Number of Taylor expansion terms to include in matrix logarithm approximation')
-parser.add_argument('--dinoCentMom', default=0.99, type=float, help='Momentum coefficient for teacher center vector')
+parser.add_argument('--dinoCentMom', default=0.9, type=float, help='Momentum coefficient for teacher center vector')
 parser.add_argument('--dinoTauS', default=0.1, type=float, help='Temperature for student network (online) softmax')
 parser.add_argument('--dinoTauT', default=0.05, type=float, help='Temperature for teacher network (target) softmax')
 
@@ -127,9 +127,12 @@ def main():
     args = parser.parse_args()
 
     #args.trainRoot = r'D:/ImageNet100/train'
-    #args.ptPrefix = 'CIFAR_RN18'
+    #args.ptPrefix = 'RN18'
     #args.rnCifarMod = True
     #args.batchSize = 32
+    #args.lossType = 'dino'
+    #args.prjArch = 'dino_cnn'
+    #args.momEncBeta = 0.999
     #args.winceBeta = 1.0
     #args.winceEps = 0.1
     #args.sslLossType = 'dino'
@@ -331,6 +334,7 @@ def main_worker(gpu, args):
                 if args.useDDP and args.nProcs > 1:
                     model.broadcast_buffers = True
 
+                # Optionally concatenate adversarial inputs with original inputs
                 for i in range(len(advTensList)):
                     if args.keepStd:
                         augList[i] = torch.cat((augList[i], advTensList[i].detach()), dim=0).cuda(args.gpu, non_blocking=True)

@@ -89,7 +89,11 @@ class Weighted_InfoNCE_Loss:
             if not self.symmetrizeLoss:
                 break
 
-        totalLoss /= (i + 1)
+
+        if self.symmetrizeLoss:
+            totalLoss /= (len(outList) * (len(outList) - 1))
+        else:
+            totalLoss /= (len(outList) - 1)
 
         return totalLoss
 
@@ -154,7 +158,10 @@ class Barlow_Twins_Loss:
             if not self.symmetrizeLoss:
                 break
 
-        totalLoss /= (i + 1)
+        if self.symmetrizeLoss:
+            totalLoss /= (len(outList) * (len(outList) - 1))
+        else:
+            totalLoss /= (len(outList) - 1)
 
         return totalLoss
 
@@ -223,7 +230,10 @@ class VICReg_Loss:
             if not self.symmetrizeLoss:
                 break
 
-        totalLoss /= (i + 1)
+        if self.symmetrizeLoss:
+            totalLoss /= (len(outList) * (len(outList) - 1))
+        else:
+            totalLoss /= (len(outList) - 1)
 
         return totalLoss
 
@@ -284,7 +294,10 @@ class MEC_Loss:
             if not self.symmetrizeLoss:
                 break
 
-        totalLoss /= (i + 1)
+        if self.symmetrizeLoss:
+            totalLoss /= (len(outList) * (len(outList) - 1))
+        else:
+            totalLoss /= (len(outList) - 1)
 
         return totalLoss
 
@@ -334,11 +347,15 @@ class DINO_Loss:
             if not self.symmetrizeLoss:
                 break
 
-        totalLoss /= (i + 1)
+        if self.symmetrizeLoss:
+            totalLoss /= (len(outList) * (len(outList) - 1))
+        else:
+            totalLoss /= (len(outList) - 1)
 
         # Update center using momentum
-        teacherOut = torch.cat([outList[i][-1] for i in range(len(outList))], dim=0)
-        self.center = self.centerMom * self.center + (1 - self.centerMom) * torch.mean(teacherOut, dim=0, keepdim=True)
+        with torch.no_grad():
+            teacherOut = torch.cat([outList[i][-1] for i in range(len(outList))], dim=0)
+            self.center = self.centerMom * self.center + (1 - self.centerMom) * torch.mean(teacherOut, dim=0, keepdim=True)
 
         return totalLoss
 
