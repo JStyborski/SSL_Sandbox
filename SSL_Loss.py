@@ -308,7 +308,7 @@ class DINO_Loss:
     # In fact, in the ViT implementation, DINO uses no BatchNorm layers at all
     # The authors of the original DINO paper also find that L2 normalization in the projector head is crucial for stability (see appendix)
 
-    def __init__(self, symmetrizeLoss=False, centerMom=0.99, studentTau=0.1, teacherTau=0.05):
+    def __init__(self, symmetrizeLoss=False, centerMom=0.9, studentTau=0.1, teacherTau=0.05):
         """
         :param symmetrizeLoss: [Bool] - Boolean to symmetrize loss
         :param centerMom: [float] - Momentum coefficient for teacher center vector

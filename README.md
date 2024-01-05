@@ -42,7 +42,8 @@ Required libraries
 - PyTorch (>v2.1.0): Installs along with torchvision and torchaudio from https://pytorch.org/get-started/locally/
 - torchmetrics: Recommend installing along with PyTorch-Lightning, as in "conda install -c conda-forge pytorch-lightning"
 - timm: Recommend installing along with HuggingFace, as in "conda install -c fastai timm"
-Some auxiliary libraries (used by portions of the code that are currently unused or commented out) include matplotlib, torchattacks, and probably some others.
+
+Some auxiliary libraries (used by portions of the code that are currently unused or commented out) include matplotlib, torchattacks, scipy, sklearn, and probably others.
 
 ### SSL Poison Generation
 
@@ -62,6 +63,7 @@ The implemented method works as follows:
 - After training, synthesize final 'poisoned' images by saving combined source image + perturbation
 
 Example command line inputs:
+
 Unlearnable example poison generation for CIFAR100 on SimCLR with ResNet18 encoder:
 python SSL_Poison_DDP.py --trainRoot ../Datasets/CIFAR100/train --deltaRoot ../Datasets/Poisoned_CIFAR/CP_100/deltas --poisonRoot ../Datasets/Poisoned_CIFAR/CP_100/train 
 --ptPrefix CP --prdHidDim 0 --winceBeta 1.0 --applySG False
@@ -86,7 +88,17 @@ Unfinished description
 
 File: SSL_Evaluate.py
 
-Unfinished description
+Evaluate the specified pretrained and finetuned models for KNN accuracy, train accuracy, test accuracy, and adversarial accuracy.
+In the interest of training efficiency, the Pretrain and Finetune scripts do not run all of the metrics of interest at each epoch. 
+The Evaluate script evaluates the specified pretrained and finetuned models on various metrics.
+Pretrained models are evaluated on representation eigenvalue effective rank, representation local Lipschitz smoothness, and KNN accuracy.
+Finetuned models are evaluated on train set accuracy, test set accuracy, and adversarial test accuracy.
+There is an option to bypass evaluation on finetuned models if desired. This is useful if you want to evaluate a series of pretrained models.
+SSL_Evaluate.py does not currently support DistributedDataParallel.
+SSL_Evaluate.py parameters cannot be input via command line - You must edit the values in the 'User Inputs' section and run the script via IDE (e.g., PyCharm) or via a command line.
+
+Example command line inputs:
+python SSL_Evaluate.py
 
 ### Development Notes
 

@@ -57,6 +57,14 @@ def t_tensor_aug(cropSize):
     ])
     return t
 
+def t_resize_normalize(cropSize):
+    t = T.Compose([
+        T.Resize((int(round(2 * cropSize)), int(round(2 * cropSize)))),  # CIFAR: 1.1428 * 28 = 32, IN: 1.1428 * 224 = 256
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    return t
+
 
 class GaussianBlur(object):
     """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""
